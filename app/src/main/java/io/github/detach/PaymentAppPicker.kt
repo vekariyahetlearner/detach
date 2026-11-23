@@ -8,6 +8,8 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -17,12 +19,15 @@ import android.util.LruCache
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.BaseAdapter
 import android.widget.CheckBox
 import android.widget.Checkable
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
@@ -38,11 +43,30 @@ import java.util.concurrent.TimeUnit
 @Suppress("DEPRECATION")
 object PaymentAppPicker {
     fun show(activity: Activity, onSaved: () -> Unit) {
-        if (!activity.isFinishing && !activity.isDestroyed) Session(activity, false, onSaved).show()
+        show(activity, Mode.PAYMENT, onSaved)
     }
 
     fun showBlockedApps(activity: Activity, onSaved: () -> Unit) {
-        if (!activity.isFinishing && !activity.isDestroyed) Session(activity, true, onSaved).show()
+        show(activity, Mode.BLOCKED, onSaved)
+    }
+
+    internal fun showFocusApps(activity: Activity, onSaved: () -> Unit) {
+        show(activity, Mode.FOCUS, onSaved)
+    }
+
+    internal fun showDistractingApps(activity: Activity, onSaved: () -> Unit) {
+        show(activity, Mode.DISTRACTION, onSaved)
+    }
+
+    private fun show(activity: Activity, mode: Mode, onSaved: () -> Unit) {
+        if (!activity.isFinishing && !activity.isDestroyed) Session(activity, mode, onSaved).show()
+    }
+
+    private enum class Mode(val title: String) {
+        PAYMENT("Auto-pause apps"),
+        BLOCKED("Select apps to block"),
+        FOCUS("Allowed during Focus"),
+        DISTRACTION("Choose distracting apps"),
     }
 
     internal data class App(val info: ApplicationInfo, val name: String) {
@@ -55,10 +79,15 @@ object PaymentAppPicker {
         val packages = manager.queryIntentActivities(launcher, 0).mapNotNull { it.activityInfo?.packageName }.toSet() +
             (if (blocking) manager.queryIntentActivities(leanback, 0).mapNotNull { it.activityInfo?.packageName } else emptyList()) +
             saved + if (blocking) emptySet() else Targets.PAYMENT_DEFAULTS
-        val collator = Collator.getInstance()
-        return packages.asSequence().filter {
+        val relevant = packages.filter {
             it != ownPackage && (blocking || it !in Targets.READABLE) && it !in Targets.SYSTEM_UI
-        }.mapNotNull { packageName ->
+        }
+        return appsFromPackages(manager, relevant, blocking)
+    }
+
+    internal fun appsFromPackages(manager: PackageManager, packages: Iterable<String>, blocking: Boolean): List<App> {
+        val collator = Collator.getInstance()
+        return packages.mapNotNull { packageName ->
             if (Thread.currentThread().isInterrupted) throw InterruptedException()
             runCatching {
                 val info = manager.getApplicationInfo(packageName, 0)
@@ -68,7 +97,7 @@ object PaymentAppPicker {
                 else if (info.icon == 0 || name.isBlank() || name == packageName || PACKAGE_LABEL.matches(name)) null
                 else App(info, name)
             }.getOrNull()
-        }.toList().sortedWith { first, second ->
+        }.sortedWith { first, second ->
             collator.compare(first.name, second.name).takeIf { it != 0 }
                 ?: first.info.packageName.compareTo(second.info.packageName)
         }
@@ -93,13 +122,26 @@ object PaymentAppPicker {
 
     private val PACKAGE_LABEL = Regex("[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+")
 
-    private class Session(private val activity: Activity, private val blocking: Boolean, private var onSaved: (() -> Unit)?) :
+    private class Session(private val activity: Activity, private val mode: Mode, private var onSaved: (() -> Unit)?) :
         Application.ActivityLifecycleCallbacks {
         private val ui = Ui(activity)
-        private val selected = (if (blocking) Settings(activity).blockedPackages else Settings(activity).paymentPackages).toMutableSet()
+        private val settings = Settings(activity)
+        private val selected = when (mode) {
+            Mode.PAYMENT -> settings.paymentPackages
+            Mode.BLOCKED -> settings.blockedPackages
+            Mode.FOCUS -> settings.focusAllowedPackages
+            Mode.DISTRACTION -> ScreenTimePreferences(activity).distractingApps
+        }.toMutableSet()
+        private val focus = mode == Mode.FOCUS
+        private val distraction = mode == Mode.DISTRACTION
+        private val tagPrefix = when {
+            focus -> "focus-app"
+            distraction -> "distraction-app"
+            else -> "payment-app"
+        }
         private val handler = Handler(Looper.getMainLooper())
         private val executor = ThreadPoolExecutor(1, 1, 10, TimeUnit.SECONDS, ArrayBlockingQueue(24)) { task ->
-            Thread(task, "payment-app-picker").apply { isDaemon = true }
+            Thread(task, tagPrefix).apply { isDaemon = true }
         }
         private val icons = object : LruCache<String, Bitmap>(4 * 1024 * 1024) {
             override fun sizeOf(key: String, value: Bitmap) = value.byteCount
@@ -108,24 +150,34 @@ object PaymentAppPicker {
         private val failedIcons = mutableSetOf<String>()
         private var apps = emptyList<App>()
         private var visibleApps = emptyList<App>()
+        private var duplicateNames = emptySet<String>()
         private var closed = false
         private var loaded = false
         private val iconSize = ui.dp(40).coerceIn(1, 192)
         private val search = ui.style(EditText(activity)).apply {
-            tag = "payment-app-search"
+            tag = "$tagPrefix-search"
             hint = "Search installed apps"
             contentDescription = "Search installed apps"
             isSingleLine = true
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_WORDS
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            backgroundTintList = null
+            background = android.graphics.drawable.StateListDrawable().apply {
+                addState(intArrayOf(android.R.attr.state_focused), ui.shape(ui.fieldSurface, ui.accent, 15))
+                addState(intArrayOf(), ui.shape(ui.fieldSurface, ui.line, 15))
+            }
+            setPaddingRelative(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(10))
+            val glyph = activity.getDrawable(R.drawable.ic_search)?.mutate()?.apply { setTint(ui.sub) }
+            setCompoundDrawablesRelativeWithIntrinsicBounds(glyph, null, null, null)
+            compoundDrawablePadding = ui.dp(8)
         }
         private val summary = ui.note("").apply {
-            tag = "payment-app-summary"
+            tag = "$tagPrefix-summary"
             setPadding(0, ui.dp(8), 0, ui.dp(8))
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
         private val status = ui.text("Loading installed apps…", 15f, ui.sub).apply {
-            tag = "payment-app-status"
+            tag = "$tagPrefix-status"
             gravity = Gravity.CENTER
             setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16))
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
@@ -134,28 +186,42 @@ object PaymentAppPicker {
             override fun getCount() = visibleApps.size
             override fun getItem(position: Int) = visibleApps[position]
             override fun getItemId(position: Int) = position.toLong()
+            override fun areAllItemsEnabled() = !focus
+            override fun isEnabled(position: Int) = !isRequired(getItem(position).info.packageName)
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val app = getItem(position)
                 val row = convertView as? AppRow ?: AppRow(activity, ui)
-                row.bind(app.name, app.info.packageName in selected, icons.get(app.info.packageName))
+                val packageName = app.info.packageName
+                val required = isRequired(packageName)
+                val detail = listOfNotNull(
+                    "Always allowed".takeIf { required },
+                    packageName.takeIf { app.searchName in duplicateNames },
+                ).joinToString(" · ")
+                row.bind(app.name, detail, packageName in selected, required, icons.get(packageName))
                 requestIcon(app)
                 return row
             }
         }
+        private val clear = if (!focus && !distraction) null else ui.quiet(if (focus) "Clear optional" else "Clear all") {
+            selected.removeAll { !isRequired(it) }
+            adapter.notifyDataSetChanged()
+            updateSummary()
+        }
         private val list = ListView(activity).apply {
-            tag = "payment-app-list"
+            tag = "$tagPrefix-list"
             divider = null
             adapter = this@Session.adapter
             emptyView = status
             setOnItemClickListener { _, view, position, _ ->
                 val packageName = visibleApps[position].info.packageName
+                if (isRequired(packageName)) return@setOnItemClickListener
                 if (!selected.add(packageName)) selected.remove(packageName)
-                if (blocking && packageName !in selected && packageName in Settings(activity).blockedPackages &&
+                if (mode == Mode.BLOCKED && packageName !in selected && packageName in settings.blockedPackages &&
                     BreatherBudget.restrictionsLocked(activity)) {
                     selected.add(packageName)
                     android.widget.Toast.makeText(activity, "Blocked apps are locked until the daily allowance resets.", android.widget.Toast.LENGTH_SHORT).show()
                 }
-                if (!blocking && packageName in selected && packageName !in Settings(activity).paymentPackages &&
+                if (mode == Mode.PAYMENT && packageName in selected && packageName !in settings.paymentPackages &&
                     BreatherBudget.restrictionsLocked(activity)) {
                     selected.remove(packageName)
                     android.widget.Toast.makeText(activity, "Payment app additions are locked until the daily allowance resets.", android.widget.Toast.LENGTH_SHORT).show()
@@ -169,17 +235,50 @@ object PaymentAppPicker {
             override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) = filter()
             override fun afterTextChanged(text: Editable?) = Unit
         }
+        private val listHeight = (activity.resources.displayMetrics.heightPixels * 0.42f).toInt()
+        private val listPanel = FrameLayout(activity).apply {
+            addView(list, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(status, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+        private val visibleFrame = Rect()
+        private val resizeList = ViewTreeObserver.OnGlobalLayoutListener { resizeForKeyboard() }
+
+        private fun resizeForKeyboard(keyboardInset: Int = 0) {
+            if (closed || listPanel.height == 0) return
+            val decor = listPanel.rootView
+            decor.getWindowVisibleDisplayFrame(visibleFrame)
+            if (visibleFrame.isEmpty) return
+            val chromeHeight = decor.height - listPanel.height
+            val available = if (Build.VERSION.SDK_INT >= 30) {
+                val keyboard = maxOf(keyboardInset, decor.rootWindowInsets?.getInsets(WindowInsets.Type.ime())?.bottom ?: 0)
+                val windowHeight = activity.windowManager.currentWindowMetrics.bounds.height()
+                minOf(visibleFrame.height(), windowHeight - keyboard)
+            } else visibleFrame.height()
+            val height = minOf(listHeight, (available - chromeHeight - ui.dp(16)).coerceAtLeast(ui.dp(48)))
+            if (listPanel.layoutParams.height != height) {
+                listPanel.layoutParams = listPanel.layoutParams.apply { this.height = height }
+            }
+        }
         private val dialog = AlertDialog.Builder(activity)
-            .setTitle(if (blocking) "Select apps to block" else "Auto-pause apps")
+            .setTitle(mode.title)
             .setView(LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(ui.dp(20), ui.dp(8), ui.dp(20), 0)
+                setPadding(ui.dp(18), ui.dp(8), ui.dp(18), 0)
+                if (distraction) {
+                    addView(ui.note("Leave study, work, and other useful apps unchecked."))
+                    addView(ui.space(8))
+                }
                 addView(search)
-                addView(summary)
-                addView(android.widget.FrameLayout(activity).apply {
-                    addView(list, ViewGroup.LayoutParams(-1, -1))
-                    addView(status, ViewGroup.LayoutParams(-1, -1))
-                }, LinearLayout.LayoutParams(-1, (activity.resources.displayMetrics.heightPixels * 0.42f).toInt(), 1f))
+                if (clear == null) {
+                    addView(summary)
+                } else {
+                    addView(LinearLayout(activity).apply {
+                        gravity = Gravity.CENTER_VERTICAL
+                        addView(summary, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                        addView(clear, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    })
+                }
+                addView(listPanel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, listHeight))
             })
             .setPositiveButton("Save", null)
             .setNegativeButton("Cancel", null)
@@ -192,16 +291,34 @@ object PaymentAppPicker {
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             dialog.show()
             ui.style(dialog)
+            dialog.window?.decorView?.let { decor ->
+                decor.viewTreeObserver.addOnGlobalLayoutListener(resizeList)
+                if (Build.VERSION.SDK_INT >= 30) {
+                    // A floating window can receive new IME insets without a new global layout.
+                    decor.setOnApplyWindowInsetsListener { view, insets ->
+                        val keyboard = insets.getInsets(WindowInsets.Type.ime()).bottom
+                        view.post { resizeForKeyboard(keyboard) }
+                        view.onApplyWindowInsets(insets)
+                    }
+                }
+            }
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).apply {
                 isEnabled = false
                 setOnClickListener {
                     if (closed || !loaded || activity.isFinishing || activity.isDestroyed) return@setOnClickListener
-                    if (blocking) {
-                        val current = Settings(activity).blockedPackages
-                        Settings(activity).blockedPackages = if (BreatherBudget.restrictionsLocked(activity)) selected + current else selected
-                    } else {
-                        val current = Settings(activity).paymentPackages
-                        Settings(activity).paymentPackages = if (BreatherBudget.restrictionsLocked(activity)) selected intersect current else selected
+                    when (mode) {
+                        Mode.BLOCKED -> settings.blockedPackages =
+                            if (BreatherBudget.restrictionsLocked(activity)) selected + settings.blockedPackages else selected
+                        Mode.PAYMENT -> settings.paymentPackages =
+                            if (BreatherBudget.restrictionsLocked(activity)) selected intersect settings.paymentPackages else selected
+                        Mode.FOCUS -> {
+                            if (FocusSession.active(activity)) {
+                                dialog.dismiss()
+                                return@setOnClickListener
+                            }
+                            settings.focusAllowedPackages = selected
+                        }
+                        Mode.DISTRACTION -> ScreenTimePreferences(activity).distractingApps = selected
                     }
                     val callback = onSaved
                     dialog.dismiss()
@@ -212,11 +329,13 @@ object PaymentAppPicker {
             updateSummary()
             val owner = WeakReference(this)
             val main = handler
-            val manager = activity.applicationContext.packageManager
-            val ownPackage = activity.packageName
+            val context = activity.applicationContext
             val saved = selected.toSet()
             executor.execute {
-                val result = runCatching { loadApps(manager, ownPackage, saved, blocking) }
+                val result = runCatching {
+                    if (focus) FocusAppPicker.pickableApps(context, saved)
+                    else loadApps(context.packageManager, context.packageName, saved, mode != Mode.PAYMENT)
+                }
                 main.post { owner.get()?.receiveApps(result) }
             }
         }
@@ -225,21 +344,42 @@ object PaymentAppPicker {
             if (closed) return
             loaded = result.isSuccess
             apps = result.getOrDefault(emptyList())
+            if (focus || distraction) duplicateNames = apps.groupBy { it.searchName }.filterValues { it.size > 1 }.keys
             filter()
+            updateSummary()
             if (!loaded) status.text = "Couldn’t load installed apps. Please try again."
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = loaded
         }
 
         private fun filter() {
             val query = search.text.toString().trim().lowercase(Locale.ROOT)
-            visibleApps = if (query.isEmpty()) apps else apps.filter { query in it.searchName }
+            visibleApps = if (query.isEmpty()) apps else apps.filter {
+                query in it.searchName || (focus || distraction) && query in it.info.packageName.lowercase(Locale.ROOT)
+            }
             if (loaded) status.text = if (query.isEmpty()) "No installed apps available" else "No matching apps"
             adapter.notifyDataSetChanged()
         }
 
         private fun updateSummary() {
-            summary.text = "${selected.size} selected. Saved choices for unavailable apps are kept."
+            if (focus) {
+                val count = apps.count { it.info.packageName in selected }
+                summary.text = when {
+                    !loaded -> ""
+                    count == 1 -> "1 app allowed"
+                    else -> "$count apps allowed"
+                }
+                clear?.isEnabled = loaded && selected.any { !isRequired(it) }
+            } else if (distraction) {
+                val unavailable = selected.size - apps.count { it.info.packageName in selected }
+                summary.text = if (!loaded) "" else "${selected.size} selected" +
+                    if (unavailable > 0) " · $unavailable unavailable" else ""
+                clear?.isEnabled = loaded && selected.isNotEmpty()
+            } else {
+                summary.text = "${selected.size} selected. Saved choices for unavailable apps are kept."
+            }
         }
+
+        private fun isRequired(packageName: String) = focus && settings.focusRequired(packageName)
 
         private fun requestIcon(app: App) {
             val packageName = app.info.packageName
@@ -265,7 +405,7 @@ object PaymentAppPicker {
                 icons.put(packageName, bitmap)
                 adapter.notifyDataSetChanged()
             } else {
-                if (blocking) {
+                if (mode != Mode.PAYMENT) {
                     failedIcons.add(packageName)
                 } else {
                     apps = apps.filterNot { it.info.packageName == packageName }
@@ -278,6 +418,10 @@ object PaymentAppPicker {
             if (closed) return
             closed = true
             activity.application.unregisterActivityLifecycleCallbacks(this)
+            dialog.window?.decorView?.let { decor ->
+                decor.viewTreeObserver.removeOnGlobalLayoutListener(resizeList)
+                if (Build.VERSION.SDK_INT >= 30) decor.setOnApplyWindowInsetsListener(null)
+            }
             search.removeTextChangedListener(watcher)
             list.adapter = null
             list.onItemClickListener = null
@@ -314,9 +458,12 @@ object PaymentAppPicker {
             imageTintList = null
             scaleType = ImageView.ScaleType.FIT_CENTER
         }
-        private val name = ui.text("", 16f).apply {
+        private val name = ui.text("", 16f, strong = true).apply {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            setPadding(ui.dp(12), 0, ui.dp(8), 0)
+        }
+        private val detail = ui.note("").apply {
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            visibility = View.GONE
         }
         private val checkbox = CheckBox(activity).apply {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -331,21 +478,37 @@ object PaymentAppPicker {
             gravity = Gravity.CENTER_VERTICAL
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
             minimumHeight = ui.dp(64)
-            setPadding(ui.dp(4), ui.dp(8), 0, ui.dp(8))
+            setPaddingRelative(ui.dp(8), ui.dp(6), ui.dp(3), ui.dp(6))
+            background = android.graphics.drawable.StateListDrawable().apply {
+                addState(intArrayOf(android.R.attr.state_activated), ui.shape(ui.accentSurface, radius = 14))
+                addState(intArrayOf(), ui.shape(android.graphics.Color.TRANSPARENT))
+            }
             addView(icon, LayoutParams(ui.dp(40), ui.dp(40)))
-            addView(name, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(LinearLayout(activity).apply {
+                orientation = VERTICAL
+                setPaddingRelative(ui.dp(12), 0, ui.dp(8), 0)
+                addView(name)
+                addView(detail)
+            }, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(checkbox, LayoutParams(ui.dp(48), ui.dp(48)))
         }
 
-        fun bind(label: String, checked: Boolean, bitmap: Bitmap?) {
+        fun bind(label: String, description: String, checked: Boolean, required: Boolean, bitmap: Bitmap?) {
             name.text = label
-            contentDescription = label
+            detail.text = description
+            detail.visibility = if (description.isEmpty()) View.GONE else View.VISIBLE
+            contentDescription = if (description.isEmpty()) label else "$label, $description"
             isChecked = checked
+            isEnabled = !required
+            checkbox.isEnabled = !required
             icon.setImageBitmap(bitmap)
         }
 
         override fun isChecked() = checkbox.isChecked
-        override fun setChecked(checked: Boolean) { checkbox.isChecked = checked }
+        override fun setChecked(checked: Boolean) {
+            checkbox.isChecked = checked
+            isActivated = checked
+        }
         override fun toggle() { isChecked = !isChecked }
 
         override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {

@@ -49,18 +49,19 @@ class Settings(context: Context) {
 
     /** Apps that remain reachable from the Focus home. These are deliberately useful defaults. */
     var focusAllowedPackages: Set<String>
-        get() {
-            val stored = runCatching { p.getStringSet("focus_allowed_packages", FOCUS_DEFAULTS) }
-                .getOrDefault(FOCUS_DEFAULTS).orEmpty().filterTo(mutableSetOf()) { validFocusPackage(it) }
-            // A zero-app Focus home is a dead end. Keep a usable essential set until the user
-            // explicitly replaces it with one or more apps in the picker.
-            return (stored + FOCUS_REQUIRED).ifEmpty { FOCUS_DEFAULTS }
+        get() = runCatching { p.getStringSet("focus_allowed_packages", FOCUS_DEFAULTS) }
+            .getOrDefault(FOCUS_DEFAULTS).orEmpty().filterTo(mutableSetOf(), ::canAllowInFocus) + FOCUS_ESSENTIALS.keys
+        set(value) {
+            p.edit().putStringSet("focus_allowed_packages", value.filterTo(mutableSetOf(), ::canAllowInFocus)).apply()
         }
-        set(value) { p.edit().putStringSet("focus_allowed_packages", (value + FOCUS_REQUIRED).filterTo(mutableSetOf()) { validFocusPackage(it) }).apply() }
 
-    fun focusRequired(packageName: String) = packageName in FOCUS_REQUIRED
+    fun focusRequired(packageName: String) = packageName in FOCUS_ESSENTIALS
 
-    private fun validFocusPackage(value: String) = value.length <= 255 && value.matches(PACKAGE_NAME) &&
+    internal fun focusEssential(packageName: String) = FOCUS_ESSENTIALS[packageName]
+
+    internal enum class FocusEssential { PHONE, CONTACTS, WHATSAPP }
+
+    internal fun canAllowInFocus(value: String) = value.length <= 255 && value.matches(PACKAGE_NAME) &&
         value != app.packageName && value !in Targets.SYSTEM_UI && value !in Targets.GUARDED
 
     private fun validBlockedPackage(value: String) = value.length <= 255 && value.matches(PACKAGE_NAME) &&
@@ -87,16 +88,15 @@ class Settings(context: Context) {
     }
 
     private companion object {
-        /** Common Android packages; unavailable entries simply do not appear in the Focus grid. */
-        val FOCUS_DEFAULTS = setOf(
-            "com.google.android.dialer", "com.android.dialer",
-            "com.google.android.contacts", "com.android.contacts",
-            "com.whatsapp", "com.google.android.apps.docs",
+        /** Common Android variants of the required apps; unavailable entries aren't shown. */
+        val FOCUS_ESSENTIALS = mapOf(
+            "com.google.android.dialer" to FocusEssential.PHONE,
+            "com.android.dialer" to FocusEssential.PHONE,
+            "com.google.android.contacts" to FocusEssential.CONTACTS,
+            "com.android.contacts" to FocusEssential.CONTACTS,
+            "com.whatsapp" to FocusEssential.WHATSAPP,
         )
-        val FOCUS_REQUIRED = setOf(
-            "com.google.android.dialer", "com.android.dialer",
-            "com.google.android.contacts", "com.android.contacts", "com.whatsapp",
-        )
+        val FOCUS_DEFAULTS = FOCUS_ESSENTIALS.keys + "com.google.android.apps.docs"
         val PACKAGE_NAME = Regex("[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+")
     }
 }

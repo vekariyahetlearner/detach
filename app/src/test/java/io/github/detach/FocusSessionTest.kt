@@ -3,6 +3,7 @@ package io.github.detach
 import android.content.Context
 import android.view.View
 import android.widget.TextView
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -37,6 +38,12 @@ class FocusSessionTest {
         assertTrue("com.google.android.apps.docs" in allowed)
         assertTrue(allowed.any { it.endsWith(".dialer") })
         assertTrue(allowed.any { it.endsWith(".contacts") })
+    }
+
+    @Test fun `countdown rounds partial seconds and displays hours for long sessions`() {
+        assertEquals("1:00 remaining", FocusSession.remainingLabel(59_999))
+        assertEquals("0:01 remaining", FocusSession.remainingLabel(1))
+        assertEquals("1:01:01 remaining", FocusSession.remainingLabel(3_660_001))
     }
 
     @Test fun `empty saved allowlist recovers to useful defaults`() {

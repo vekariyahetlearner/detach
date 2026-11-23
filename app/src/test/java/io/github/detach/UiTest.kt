@@ -46,8 +46,6 @@ class UiTest {
     @Before fun reset() {
         for (name in listOf("settings", "lock", "pause", "breather", "breather_budget")) context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
         SystemSettings.Global.putInt(context.contentResolver, SystemSettings.Global.BOOT_COUNT, 9)
-        context.getSharedPreferences(MainActivity.UPDATE_PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(MainActivity.WIDGET_UPDATE_KEY, true).commit()
         SystemSettings.Global.putFloat(context.contentResolver, SystemSettings.Global.ANIMATOR_DURATION_SCALE, 0f)
         SystemSettings.Secure.putString(context.contentResolver, SystemSettings.Secure.ENABLED_ACCESSIBILITY_SERVICES, "")
         Shadow.extract<ShadowBiometricManager>(context.getSystemService(BiometricManager::class.java)).setCanAuthenticate(false)
@@ -55,6 +53,7 @@ class UiTest {
 
     @Test fun `all three Instagram allowances remain independently editable`() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "limits")
         disclosure(activity, "instagram-options").performClick()
         val settings = Settings(activity)
         toggle(activity, "Allow Stories").performClick()
@@ -71,6 +70,7 @@ class UiTest {
     @Test fun `exhausted budget prevents weakening Instagram and YouTube controls`() {
         assertTrue(BreatherBudget.charge(context, 30))
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "limits")
         toggle(activity, "Instagram protection").performClick()
         toggle(activity, "YouTube protection").performClick()
         assertTrue(Settings(activity).igEnabled)
@@ -86,6 +86,7 @@ class UiTest {
             BreatherTestSupport.activity(), 10, Breather.Feature.entries.toSet()
         ))
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "limits")
         disclosure(activity, "instagram-options").performClick()
         toggle(activity, "Hide home feed").performClick()
         assertTrue(Settings(activity).igFeed)
@@ -107,6 +108,7 @@ class UiTest {
 
     @Test fun `master protection disables its child controls without changing stored allowances`() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "limits")
         disclosure(activity, "instagram-options").performClick()
         toggle(activity, "Instagram protection").performClick()
         assertFalse(Settings(activity).igEnabled)
@@ -119,6 +121,7 @@ class UiTest {
     @Test fun `protected switches revert until authentication succeeds`() {
         Lock(context).set("protected")
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "limits")
         val control = toggle(activity, "YouTube protection")
         control.performClick()
         assertTrue(control.isChecked)
@@ -132,6 +135,7 @@ class UiTest {
     @Test fun `payment selection and reminder adjustments are also password protected`() {
         Lock(context).set("protected")
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "payments")
         disclosure(activity, "payment-options").performClick()
         button(activity, "Choose payment & banking apps").performClick()
         var dialog = ShadowAlertDialog.getLatestAlertDialog()
@@ -146,6 +150,7 @@ class UiTest {
 
     @Test fun `disclosures keep the same accessible control when toggled`() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "limits")
         val header = disclosure(activity, "instagram-options")
         assertFalse(header.isSelected)
         header.performClick()
@@ -158,6 +163,7 @@ class UiTest {
 
     @Test fun `disclosures expose working accessibility expand and collapse actions`() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "limits")
         val header = disclosure(activity, "instagram-options")
         assertTrue(header.performAccessibilityAction(AccessibilityNodeInfo.ACTION_EXPAND, null))
         assertTrue(header.isSelected)
@@ -171,29 +177,38 @@ class UiTest {
     @Test fun `expanded sections and scroll survive a settings rerender and recreation`() {
         val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
         var activity = controller.get()
+        navigate(activity, "limits")
         disclosure(activity, "instagram-options").performClick()
-        disclosure(activity, "payment-options").performClick()
-        layout(activity)
+        layout(activity, 600)
         var scroll = views(activity).filterIsInstance<ScrollView>().first()
-        scroll.scrollTo(0, 400)
-        assertEquals(400, scroll.scrollY)
+        scroll.scrollTo(0, 120)
+        assertEquals(120, scroll.scrollY)
+        navigate(activity, "payments")
+        disclosure(activity, "payment-options").performClick()
+        layout(activity, 600)
+        scroll.scrollTo(0, 160)
+        assertEquals(160, scroll.scrollY)
         views(activity).first { it.contentDescription == "Increase payment pause by one minute" }.performClick()
-        layout(activity)
-        assertTrue(disclosure(activity, "instagram-options").isSelected)
+        layout(activity, 600)
         assertTrue(disclosure(activity, "payment-options").isSelected)
-        assertEquals(400, scroll.scrollY)
+        assertEquals(160, scroll.scrollY)
         controller.recreate()
         activity = controller.get()
-        layout(activity)
+        layout(activity, 600)
         scroll = views(activity).filterIsInstance<ScrollView>().first()
-        assertTrue(disclosure(activity, "instagram-options").isSelected)
+        assertTrue(disclosure(activity, "nav-payments").isSelected)
         assertTrue(disclosure(activity, "payment-options").isSelected)
-        assertEquals(400, scroll.scrollY)
+        assertEquals(160, scroll.scrollY)
+        navigate(activity, "limits")
+        layout(activity, 600)
+        assertTrue(disclosure(activity, "instagram-options").isSelected)
+        assertEquals(120, scroll.scrollY)
     }
 
     @Test fun `reminder stepper exposes its bounds and never wraps`() {
         Settings(context).pauseMinutes = 1
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "payments")
         disclosure(activity, "payment-options").performClick()
         assertFalse(views(activity).first { it.contentDescription == "Decrease payment pause by one minute" }.isEnabled)
         views(activity).first { it.contentDescription == "Increase payment pause by one minute" }.performClick()
@@ -203,6 +218,7 @@ class UiTest {
 
     @Test fun `auto pause can be changed without modifying selected payment apps`() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "payments")
         disclosure(activity, "payment-options").performClick()
         val before = Settings(activity).paymentPackages
         toggle(activity, "Auto-pause for payment apps").performClick()
@@ -212,6 +228,7 @@ class UiTest {
 
     @Test fun `foreground monitoring stays opt in until disclosure is accepted with both grants`() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "payments")
         disclosure(activity, "payment-options").performClick()
         toggle(activity, "Resume when Instagram or YouTube opens").performClick()
         assertFalse(Settings(activity).resumeOnSocialForeground)
@@ -229,6 +246,7 @@ class UiTest {
         )
         val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
         val activity = controller.get()
+        navigate(activity, "payments")
         disclosure(activity, "payment-options").performClick()
         toggle(activity, "Resume when Instagram or YouTube opens").performClick()
         val dialog = ShadowAlertDialog.getLatestAlertDialog()
@@ -247,6 +265,7 @@ class UiTest {
             AppOpsManager.OPSTR_GET_USAGE_STATS, context.applicationInfo.uid, context.packageName, AppOpsManager.MODE_ALLOWED,
         )
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "payments")
         disclosure(activity, "payment-options").performClick()
         toggle(activity, "Resume when Instagram or YouTube opens").performClick()
         ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
@@ -273,7 +292,8 @@ class UiTest {
             .putLong("until", System.currentTimeMillis() + 60_000).commit()
         val intent = Intent(context, MainActivity::class.java).setAction(Health.ACTION_DIAGNOSTICS)
         val activity = Robolectric.buildActivity(MainActivity::class.java, intent).setup().get()
-        layout(activity)
+        layout(activity, 600)
+        assertTrue(disclosure(activity, "nav-settings").isSelected)
         assertTrue(disclosure(activity, "diagnostic-info").isSelected)
         assertTrue(views(activity).filterIsInstance<ScrollView>().first().scrollY > 0)
         assertTrue(Pause.isPending(activity))
@@ -284,10 +304,11 @@ class UiTest {
     @Test fun `diagnostics notification to an existing activity reveals its report without resuming`() {
         val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
         val activity = controller.get()
+        navigate(activity, "settings")
         layout(activity)
         assertFalse(disclosure(activity, "diagnostic-info").isSelected)
         controller.pause().newIntent(Intent(activity, MainActivity::class.java).setAction(Health.ACTION_DIAGNOSTICS)).resume()
-        layout(activity)
+        layout(activity, 600)
         assertTrue(disclosure(activity, "diagnostic-info").isSelected)
         assertTrue(views(activity).filterIsInstance<ScrollView>().first().scrollY > 0)
         assertEquals("", SystemSettings.Secure.getString(context.contentResolver, SystemSettings.Secure.ENABLED_ACCESSIBILITY_SERVICES))
@@ -361,6 +382,17 @@ class UiTest {
         assertEquals("Block Shorts", toggle.contentDescription)
     }
 
+    @Test fun `decorative hero wraps its content inside a taller viewport`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val ui = Ui(activity)
+        val content = ui.primary("Start Focus") {}
+        val hero = ui.hero(content)
+        hero.measure(View.MeasureSpec.makeMeasureSpec(ui.dp(340), View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(ui.dp(580), View.MeasureSpec.AT_MOST))
+        assertEquals(content.measuredHeight, hero.measuredHeight)
+        assertTrue(hero.measuredHeight in ui.dp(48)..ui.dp(100))
+    }
+
     @Test @Config(qualifiers = "night") fun `dark palette is deliberate and readable`() {
         val ui = Ui(context)
         assertNotEquals(ui.bg, ui.fg)
@@ -371,6 +403,7 @@ class UiTest {
 
     @Test fun `payment preferences disclose the password bypass and manual resume tradeoff`() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "payments")
         disclosure(activity, "payment-options").performClick()
         val notice = views(activity).filterIsInstance<TextView>().first { it.text.contains("bypasses your password") }
         assertEquals(View.VISIBLE, notice.visibility)
@@ -380,23 +413,22 @@ class UiTest {
 
     @Test fun `payment section exposes the widget action`() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        navigate(activity, "payments")
         assertNotNull(button(activity, "Add payment widget"))
     }
 
-    @Test fun `widget update details are shown once`() {
-        context.getSharedPreferences(MainActivity.UPDATE_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
-        val first = Robolectric.buildActivity(MainActivity::class.java).setup().get()
-        val dialog = ShadowAlertDialog.getLatestAlertDialog()
-        assertTrue(dialog.isShowing)
-        assertEquals("New: Payment widget", shadowOf(dialog).title.toString())
-        assertTrue(shadowOf(dialog).message.toString().contains("1×1 up to 2×4"))
-        assertTrue(context.getSharedPreferences(MainActivity.UPDATE_PREFS, Context.MODE_PRIVATE)
-            .getBoolean(MainActivity.WIDGET_UPDATE_KEY, false))
-        dialog.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
-        first.finish()
-
-        Robolectric.buildActivity(MainActivity::class.java).setup().get()
-        assertFalse(ShadowAlertDialog.getLatestAlertDialog().isShowing)
+    @Test fun `navigation shows one destination at a time and back returns to Sessions`() {
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        assertTrue(disclosure(activity, "nav-sessions").isSelected)
+        assertNotNull(button(activity, "Set Focus duration"))
+        assertTrue(views(activity).none { it.tag == "payments" || it.tag == "instagram" || it.tag == "setup" })
+        navigate(activity, "payments")
+        assertTrue(disclosure(activity, "nav-payments").isSelected)
+        assertNotNull(button(activity, "Add payment widget"))
+        assertTrue(views(activity).none { it.tag == "focus" || it.tag == "instagram" })
+        activity.onBackPressed()
+        assertTrue(disclosure(activity, "nav-sessions").isSelected)
+        assertNotNull(button(activity, "Set Focus duration"))
     }
 
     @Test fun `enabled accessibility without a connected service never claims active protection`() {
@@ -419,11 +451,12 @@ class UiTest {
     private fun toggle(activity: Activity, label: String) = views(activity).filterIsInstance<Switch>().first { it.contentDescription == label }
     private fun button(activity: Activity, label: String) = views(activity).filterIsInstance<Button>().first { it.text == label }
     private fun disclosure(activity: Activity, key: String) = views(activity).first { it.tag == key }
+    private fun navigate(activity: Activity, page: String) = disclosure(activity, "nav-$page").performClick()
 
-    private fun layout(activity: Activity) {
+    private fun layout(activity: Activity, height: Int = 1600) {
         val decor = activity.window.decorView
-        decor.measure(View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1600, View.MeasureSpec.EXACTLY))
-        decor.layout(0, 0, 1080, 1600)
+        decor.measure(View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY))
+        decor.layout(0, 0, 1080, height)
         decor.viewTreeObserver.dispatchOnPreDraw()
     }
 }

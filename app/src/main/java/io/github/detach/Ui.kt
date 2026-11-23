@@ -7,6 +7,9 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.drawable.ClipDrawable
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
@@ -31,6 +34,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.Switch
 import android.widget.TextView
 
@@ -43,12 +47,15 @@ class Ui(private val context: Context) {
     val surface = context.getColor(R.color.surface)
     val accent = context.getColor(R.color.accent)
     val onAccent = context.getColor(R.color.on_accent)
+    val accentSurface = context.getColor(R.color.accent_surface)
+    val fieldSurface = context.getColor(R.color.field_surface)
     val disabledInk = context.getColor(R.color.disabled_ink)
     val disabledSurface = context.getColor(R.color.disabled_surface)
     val controlOutline = context.getColor(R.color.control_outline)
     val caution = context.getColor(R.color.caution)
     val regular: Typeface = Typeface.create("sans-serif", Typeface.NORMAL)
     val medium: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+    private val displayFace = Typeface.create(regular, 650, false)
 
     fun dp(value: Int) = (value * context.resources.displayMetrics.density).toInt()
 
@@ -66,11 +73,17 @@ class Ui(private val context: Context) {
         setLineSpacing(dp(3).toFloat(), 1f)
     }
 
-    fun note(label: CharSequence) = text(label, 13f, sub)
+    fun note(label: CharSequence) = text(label, 14f, sub)
 
-    fun section(label: String) = text(label, 12f, sub, true).apply {
-        letterSpacing = 0.04f
-        setPadding(0, dp(28), 0, dp(12))
+    fun display(label: CharSequence, size: Float = 35f, color: Int = fg) = text(label, size, color, true).apply {
+        typeface = displayFace
+        letterSpacing = -0.034f
+        includeFontPadding = false
+    }
+
+    fun section(label: String) = text(label, 17f, fg, true).apply {
+        letterSpacing = -0.01f
+        setPadding(0, dp(22), 0, dp(10))
         isAccessibilityHeading = true
     }
 
@@ -80,9 +93,64 @@ class Ui(private val context: Context) {
         if (stroke != null) setStroke(dp(1), stroke)
     }
 
-    fun ripple(fill: Int = Color.TRANSPARENT, stroke: Int? = null, highlight: Int = context.getColor(R.color.press)) = RippleDrawable(
-        ColorStateList.valueOf(highlight), shape(fill, stroke), shape(Color.WHITE),
+    fun ripple(fill: Int = Color.TRANSPARENT, stroke: Int? = null, highlight: Int = context.getColor(R.color.press), radius: Int = 14) = RippleDrawable(
+        ColorStateList.valueOf(highlight), shape(fill, stroke, radius), shape(Color.WHITE, radius = radius),
     )
+
+    fun card(padding: Int = 16, fill: Int = surface) = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        background = shape(fill, line, 22)
+        setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
+    }
+
+    fun hero(content: View): View = FrameLayout(context).apply {
+        background = object : GradientDrawable(Orientation.TR_BL, intArrayOf(accentSurface, surface)) {
+            private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = accent
+                style = Paint.Style.STROKE
+                strokeWidth = dp(1).toFloat()
+            }
+
+            init {
+                cornerRadius = dp(26).toFloat()
+                setStroke(dp(1), line)
+            }
+
+            override fun draw(canvas: Canvas) {
+                super.draw(canvas)
+                val center = if (layoutDirection == View.LAYOUT_DIRECTION_RTL) bounds.left + dp(24) else bounds.right - dp(24)
+                for (ring in 0..5) {
+                    paint.alpha = 26 - ring * 3
+                    canvas.drawCircle(center.toFloat(), (bounds.top + dp(13)).toFloat(), dp(28 + ring * 17).toFloat(), paint)
+                }
+            }
+        }
+        clipToOutline = true
+        addView(content, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+
+    fun badge(resource: Int, size: Int = 42, tint: Int = accent, fill: Int = accentSurface) = FrameLayout(context).apply {
+        layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
+        background = shape(fill, radius = 14)
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        val glyph = dp(if (size <= 36) 18 else 22)
+        addView(icon(resource, tint = tint), FrameLayout.LayoutParams(glyph, glyph, Gravity.CENTER))
+    }
+
+    fun meter() = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
+        isIndeterminate = false
+        max = 1000
+        progressDrawable = LayerDrawable(arrayOf(
+            shape(line, radius = 4),
+            ClipDrawable(shape(accent, radius = 4), Gravity.START, ClipDrawable.HORIZONTAL),
+        )).apply {
+            setId(0, android.R.id.background)
+            setId(1, android.R.id.progress)
+        }
+        minimumHeight = dp(5)
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(5))
+    }
 
     private fun button(label: String, action: () -> Unit) = Button(context, null, android.R.attr.borderlessButtonStyle).apply {
         text = label
@@ -148,7 +216,7 @@ class Ui(private val context: Context) {
         focusStroke: Int = accent,
         highlight: Int = context.getColor(R.color.press),
     ) = StateListDrawable().apply {
-        addState(intArrayOf(-android.R.attr.state_enabled), shape(disabledFill, stroke))
+        addState(intArrayOf(-android.R.attr.state_enabled), shape(disabledFill, stroke, 14))
         addState(intArrayOf(android.R.attr.state_focused), ripple(fill, focusStroke, highlight))
         addState(intArrayOf(), ripple(fill, stroke, highlight))
     }
@@ -228,7 +296,7 @@ class Ui(private val context: Context) {
         else chevron.rotation = if (expanded) 180f else 0f
     }
 
-    fun panel() = shape(bg, line, 18)
+    fun panel() = shape(bg, line, 24)
 
     fun style(field: EditText) = field.apply {
         setTextColor(colors(fg))

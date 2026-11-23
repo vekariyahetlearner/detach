@@ -14,11 +14,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowSystemClock
+import org.robolectric.shadows.ShadowToast
 import java.time.Duration
 import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
@@ -102,6 +104,19 @@ class PauseTest {
         assertTrue(Pause.isPending(ctx))
         assertTrue(Pause.until(ctx) > System.currentTimeMillis())
         assertEquals(null, shadowOf(ctx).nextStartedService)
+    }
+
+    @Test fun `payment shortcuts explain why they close during Focus`() {
+        FocusSession.start(ctx, 1)
+        val pause = Robolectric.buildActivity(PauseActivity::class.java).create().get()
+        assertTrue(pause.isFinishing)
+        assertEquals("You can pause for payments after Focus ends.", ShadowToast.getTextOfLatestToast())
+
+        val widget = Robolectric.buildActivity(PaymentLaunchActivity::class.java).create().get()
+        assertTrue(widget.isFinishing)
+        assertEquals("Payment shortcuts are available after Focus ends.", ShadowToast.getTextOfLatestToast())
+        assertFalse(Pause.isPending(ctx))
+        assertTrue(FocusSession.active(ctx))
     }
 
     @Config(sdk = [28, 35])

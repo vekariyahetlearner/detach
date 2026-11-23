@@ -1,6 +1,16 @@
 # Using Detach
 
-Everything happens on one screen in the Detach app.
+Use the bottom navigation to switch between **Sessions** for Focus and Breather, **Limits** for app controls, **Screen time** for usage analysis, **Payments** for payment pauses and the widget, and **Settings** for permissions, passwords and diagnostics.
+
+## Screen time
+
+Open **Screen time**, enable the report and grant Detach **Usage Access** in Android settings. The report shows today’s usage, daily trends, time of day and app breakdowns for your selected apps. Tap an app for its daily breakdown.
+
+Enter a name and date of birth, then select the apps you find distracting. **Edit analysis profile** lets you correct either field and the estimate updates as you age. The name and date of birth stay on this phone and aren’t included in backups. The estimate extends your selected-app daily average to your 70th birthday. Selected Instagram use counts in full. Selected YouTube use counts only during a recorded Breather, as an estimate of Shorts use. Long videos watched during a Breather can count too. For YouTube, only days after this tracking began qualify for the average. Keep study and work apps unchecked to leave them out of the report. Partial days are excluded from the average.
+
+Detach keeps daily totals for selected apps on the phone without an expiration date. **Trends** compares matching weekdays, identifies what drove the weekly change, and shows a forecast after 14 comparable days. It shows typical forecast error based on recent held-out days. **Monthly history** includes saved records for uninstalled apps. Tap a chart day to see its total. The savings slider in **Overview** lets you model changes without applying a limit. **Turn off screen time report** stops collection and keeps the saved archive.
+
+Under **Settings → Screen time backup**, choose a folder to schedule a backup at local midnight. **Back up now** saves on demand. Detach alternates between two files to keep the previous successful copy during a write. Transfer the latest file to a new phone and use **Restore screen time backup**. Restore merges records by date and app, and leaves other settings alone. Uninstalling Detach or clearing its data removes its local archive, so keep an external backup. Android may run the scheduled job after midnight if background work is deferred.
 
 ## Protection status
 
@@ -14,9 +24,11 @@ Everything happens on one screen in the Detach app.
 
 ## Focus mode
 
-Choose **Allowed during Focus**, then start a session. The provided **Start 1-minute test Focus** button is useful for checking the full flow before a longer session. Phone, Contacts, WhatsApp and Drive are preselected when installed.
+From **Focus mode**, open **Choose allowed apps** to search your installed apps and save a selection. Phone, Contacts and WhatsApp stay selected when installed. Drive is selected by default and can be removed. Choose **Set Focus duration** to set hours, minutes and seconds, then tap **Start Focus**.
 
-During Focus, Detach opens an immersive Focus home with the current time, remaining time and only your allowed app tiles. Back does nothing on that home; Home, Recents, a launcher, a notification/deep link, or an unselected app returns to Focus. The timer ends the session automatically and then shows a completion screen. Emergency calling remains owned by Android.
+Tap **Add Focus widget** in Sessions, or find **Detach → Focus timer** in your launcher’s widget list. Tap the widget to open the same hours, minutes and seconds picker from Home. The wider widget shows your last used duration. Give it more height to get a separate **Start Focus** shortcut. Tap the time to edit it. Starting from the widget uses your existing allowed-app list and never restarts an active session.
+
+The Focus screen shows the current time, time remaining and your allowed apps. Opening another allowed app from a link or notification is supported. Leaving an allowed app for a launcher or an unselected app returns you to the Focus screen. The notification shade remains accessible and the overlay disappears when the timer ends. Emergency calling remains owned by Android.
 
 This is Accessibility-based enforcement, not Device Owner kiosk mode. Android can still be escaped by force-stopping/uninstalling Detach or safe mode; managed-device Lock Task is required for hardware-level lockdown.
 

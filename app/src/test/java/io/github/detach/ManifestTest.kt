@@ -30,7 +30,7 @@ class ManifestTest {
     @Test fun `only the launcher screen can be started by other apps`() {
         val exported = buildList {
             info.activities.orEmpty().filter { it.exported }.forEach { add(it.name) }
-            info.services.orEmpty().filter { it.exported }.forEach { add(it.name) }
+            info.services.orEmpty().filter { it.exported && it.permission != "android.permission.BIND_JOB_SERVICE" }.forEach { add(it.name) }
             info.receivers.orEmpty().filter { it.exported }.forEach { add(it.name) }
             info.providers.orEmpty().forEach { add(it.name) }
         }
@@ -111,10 +111,12 @@ class ManifestTest {
         assertEquals(setOf("android.permission.FOREGROUND_SERVICE", "android.permission.FOREGROUND_SERVICE_SPECIAL_USE"),
             permissions.filter { it.startsWith("android.permission.FOREGROUND_SERVICE") }.toSet())
         assertFalse("android.permission.QUERY_ALL_PACKAGES" in permissions)
-        assertEquals(setOf("io.github.detach.DetachService", "io.github.detach.PauseForegroundMonitor"),
+        assertEquals(setOf("io.github.detach.DetachService", "io.github.detach.PauseForegroundMonitor", "io.github.detach.UsageArchiveService"),
             info.services.orEmpty().map { it.name }.toSet())
         val monitor = info.services.orEmpty().single { it.name.endsWith(".PauseForegroundMonitor") }
         assertFalse(monitor.exported)
+        val archive = info.services.orEmpty().single { it.name.endsWith(".UsageArchiveService") }
+        assertEquals("android.permission.BIND_JOB_SERVICE", archive.permission)
     }
 
     @Test fun `permission surface is limited to local authentication reminders and explicit resume`() {
@@ -129,7 +131,8 @@ class ManifestTest {
         )
         assertEquals(0, ctx.applicationInfo.flags and ApplicationInfo.FLAG_USES_CLEARTEXT_TRAFFIC)
         assertTrue(info.providers.orEmpty().isEmpty())
-        assertEquals(setOf("io.github.detach.PauseReceiver", "io.github.detach.PaymentWidgetProvider"),
+        assertEquals(setOf("io.github.detach.PauseReceiver", "io.github.detach.PaymentWidgetProvider",
+            "io.github.detach.FocusWidgetProvider", "io.github.detach.UsageArchiveClockReceiver"),
             info.receivers.orEmpty().map { it.name }.toSet())
         info.receivers.orEmpty().forEach { assertFalse(it.exported) }
     }

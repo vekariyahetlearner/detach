@@ -107,6 +107,60 @@ class PaymentAppPickerTest {
         assertEquals(setOf(packageName), Settings(context).blockedPackages)
     }
 
+    @Test fun `Focus offers launchable choices that can be saved and preserves separate apps with the same name`() {
+        install("example.reader", "Reader")
+        install("example.readerpro", "Reader")
+        install("example.hidden", "Hidden", launchable = false)
+        install("com.android.settings", "Settings")
+        Settings(context).focusAllowedPackages = setOf("example.hidden")
+        FocusAppPicker.show(activity()) {}
+        val dialog = loadedDialog("focus-app")
+        val list = dialog.window!!.decorView.findViewWithTag<ListView>("focus-app-list")
+        assertEquals(listOf("Reader, example.reader", "Reader, example.readerpro"),
+            (0 until list.count).map { row(list, it).contentDescription })
+        click(list, 0)
+        click(list, 1)
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+        assertTrue(Settings(context).focusAllowedPackages.containsAll(listOf("example.reader", "example.readerpro", "example.hidden")))
+        assertEquals(listOf("example.reader", "example.readerpro"),
+            FocusAppPicker.allowedApps(context).map { it.info.packageName })
+    }
+
+    @Test fun `Focus shows essentials as locked and clears only optional packages`() {
+        install("com.whatsapp", "WhatsApp")
+        install("example.reader", "Reader")
+        Settings(context).focusAllowedPackages = setOf("example.reader")
+        FocusAppPicker.show(activity()) {}
+        val dialog = loadedDialog("focus-app")
+        val list = dialog.window!!.decorView.findViewWithTag<ListView>("focus-app-list")
+        val essential = row(list, 1)
+        assertEquals("WhatsApp, Always allowed", essential.contentDescription)
+        assertTrue((essential as Checkable).isChecked)
+        assertFalse(list.adapter.isEnabled(1))
+        assertFalse(essential.performAccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK, null))
+        descendants(dialog.window!!.decorView).filterIsInstance<TextView>()
+            .single { it.text == "Clear optional" }.performClick()
+        assertFalse((row(list, 0) as Checkable).isChecked)
+        assertTrue((row(list, 1) as Checkable).isChecked)
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+        assertTrue("com.whatsapp" in Settings(context).focusAllowedPackages)
+        assertFalse("example.reader" in Settings(context).focusAllowedPackages)
+    }
+
+    @Test fun `Focus collapses same-label essential variants without losing a separate app or its permissions`() {
+        install("com.android.dialer", "Phone")
+        install("com.google.android.dialer", "Phone")
+        install("example.calls", "Phone")
+        Settings(context).focusAllowedPackages = setOf("example.calls")
+        val allowed = Settings(context).focusAllowedPackages
+        val displayed = FocusAppPicker.allowedApps(context)
+        assertTrue(allowed.containsAll(listOf("com.android.dialer", "com.google.android.dialer", "example.calls")))
+        assertEquals(2, displayed.size)
+        assertTrue(displayed.any { it.info.packageName == "example.calls" })
+        assertEquals(displayed.map { it.info.packageName },
+            FocusAppPicker.pickableApps(context, allowed).map { it.info.packageName })
+    }
+
     @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
     fun `icon raster preserves authentic local colors and aspect ratio`() {
         val app = install("bank.colors", "Color Bank")
@@ -343,14 +397,15 @@ class PaymentAppPickerTest {
         setTheme(R.style.Theme_Detach)
     }
 
-    private fun loadedDialog(): AlertDialog {
+    private fun loadedDialog(tagPrefix: String = "payment-app"): AlertDialog {
         val dialog = ShadowAlertDialog.getLatestAlertDialog()
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
         while (!dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled && System.nanoTime() < deadline) {
             shadowOf(Looper.getMainLooper()).idle()
             Thread.yield()
         }
-        assertTrue("Picker did not finish loading: ${status(dialog).text}", dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled)
+        val status = dialog.window!!.decorView.findViewWithTag<TextView>("$tagPrefix-status")
+        assertTrue("Picker did not finish loading: ${status.text}", dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled)
         return dialog
     }
 
@@ -397,13 +452,15 @@ class PaymentAppPickerTest {
     }
 
     private fun addLauncher(packageName: String, name: String) {
-        shadowOf(manager).addResolveInfoForIntent(launcher, ResolveInfo().apply {
+        val info = ResolveInfo().apply {
             nonLocalizedLabel = name
             activityInfo = ActivityInfo().apply {
                 this.packageName = packageName
                 this.name = "$packageName.Launcher"
                 applicationInfo = manager.getApplicationInfo(packageName, 0)
             }
-        })
+        }
+        shadowOf(manager).addResolveInfoForIntent(launcher, info)
+        shadowOf(manager).addResolveInfoForIntent(launcher.setPackage(packageName), info)
     }
 }

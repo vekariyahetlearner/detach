@@ -17,6 +17,7 @@ class PauseActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (closeDuringFocus()) return
         if (!DetachService.isRunning) {
             Toast.makeText(
                 this,
@@ -72,9 +73,12 @@ class PauseActivity : Activity() {
         }
     }
 
-    private fun confirm() = Auth.confirm(this, "Pause for payments") { pause() }
+    private fun confirm() {
+        if (!closeDuringFocus()) Auth.confirm(this, "Pause for payments") { pause() }
+    }
 
     private fun pause() {
+        if (closeDuringFocus()) return
         val ok = DetachService.pauseForPayments()
         Toast.makeText(
             this,
@@ -82,6 +86,13 @@ class PauseActivity : Activity() {
             Toast.LENGTH_SHORT,
         ).show()
         finish()
+    }
+
+    private fun closeDuringFocus(): Boolean {
+        if (!FocusSession.active(this)) return false
+        Toast.makeText(this, "You can pause for payments after Focus ends.", Toast.LENGTH_SHORT).show()
+        finish()
+        return true
     }
 
     override fun onStop() {

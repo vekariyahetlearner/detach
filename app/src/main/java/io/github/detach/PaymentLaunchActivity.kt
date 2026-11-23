@@ -2,8 +2,6 @@ package io.github.detach
 
 import android.app.Activity
 import android.content.Intent
-import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.Gravity
@@ -11,18 +9,20 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 
 /** Brief hand-off screen used by the widget. The bank app is never started until Detach is off. */
 class PaymentLaunchActivity : Activity() {
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var packageNameToLaunch: String? = null
     private var startedAt = 0L
+    private lateinit var progress: ProgressBar
+    private lateinit var title: TextView
     private lateinit var message: TextView
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
-        packageNameToLaunch = intent.getStringExtra(EXTRA_PACKAGE)
-        val packageName = packageNameToLaunch
+        if (closeDuringFocus()) return
+        val packageName = intent.getStringExtra(EXTRA_PACKAGE)
         if (packageName == null || packageName !in Settings(this).paymentPackages ||
             this.packageManager.getLaunchIntentForPackage(packageName) == null) {
             finish()
@@ -34,6 +34,7 @@ class PaymentLaunchActivity : Activity() {
     }
 
     private fun begin(packageName: String) {
+        if (isFinishing || isDestroyed || closeDuringFocus()) return
         if (packageName in Settings(this).blockedPackages) {
             showError("This app is in your blocked apps list. Remove it there before opening it.")
             return
@@ -62,12 +63,17 @@ class PaymentLaunchActivity : Activity() {
     }
 
     private fun launch(packageName: String) {
+        if (isFinishing || isDestroyed || closeDuringFocus()) return
+        if (Pause.isServiceEnabled(this)) {
+            showError("Protection resumed before the payment app could open. Try the shortcut again.")
+            return
+        }
         if (packageName in Settings(this).blockedPackages) {
             showError("This app is in your blocked apps list. Remove it there before opening it.")
             return
         }
         val launch = packageManager.getLaunchIntentForPackage(packageName)
-        if (launch == null || isFinishing || isDestroyed) {
+        if (launch == null || packageName !in Settings(this).paymentPackages) {
             showError("This payment app is no longer available.")
             return
         }
@@ -76,43 +82,50 @@ class PaymentLaunchActivity : Activity() {
             .onSuccess { finish() }
     }
 
+    private fun closeDuringFocus(): Boolean {
+        if (!FocusSession.active(this)) return false
+        Toast.makeText(this, "Payment shortcuts are available after Focus ends.", Toast.LENGTH_SHORT).show()
+        finish()
+        return true
+    }
+
     private fun showPreparing(packageName: String) {
         val label = runCatching {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString()
         }.getOrDefault("your payment app")
-        val padding = (resources.displayMetrics.density * 28).toInt()
+        val ui = Ui(this)
+        val padding = ui.dp(28)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(padding, padding, padding, padding)
             setBackgroundColor(getColor(R.color.window))
         }
-        root.addView(ProgressBar(this).apply { isIndeterminate = true }, LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL })
-        root.addView(text("Preparing $label", 23f, true).apply { gravity = Gravity.CENTER; setPadding(0, padding, 0, 8) })
-        message = text("Turning off Detach before opening your payment app.", 15f, false).apply { gravity = Gravity.CENTER; setTextColor(getColor(R.color.secondary_ink)) }
+        progress = ProgressBar(this).apply { isIndeterminate = true }
+        root.addView(progress, LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        title = ui.text("Preparing $label", 23f, strong = true).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, padding, 0, ui.dp(8))
+            isAccessibilityHeading = true
+        }
+        root.addView(title)
+        message = ui.text("Turning off Detach before opening your payment app.", 15f, ui.sub).apply {
+            gravity = Gravity.CENTER
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
         root.addView(message)
         setContentView(root)
     }
 
     private fun showError(errorMessage: String) {
+        progress.visibility = View.GONE
+        title.text = "Payment app couldn’t open"
         message.text = errorMessage
-        val close = TextView(this).apply {
-            this.text = "Close"
-            gravity = Gravity.CENTER
-            setTextColor(getColor(R.color.on_accent))
-            textSize = 15f
-            setPadding(32, 20, 32, 20)
-            background = GradientDrawable().apply { setColor(getColor(R.color.accent)); cornerRadius = 999f }
-            setOnClickListener { finish() }
-        }
-        (message.parent as? LinearLayout)?.addView(close, LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = 40 })
-    }
-
-    private fun text(value: String, size: Float, strong: Boolean) = TextView(this).apply {
-        text = value
-        textSize = size
-        setTextColor(getColor(R.color.ink))
-        if (strong) typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD)
+        val ui = Ui(this)
+        (message.parent as LinearLayout).addView(
+            ui.primary("Close") { finish() },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = ui.dp(20) },
+        )
     }
 
     override fun onDestroy() {

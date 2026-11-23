@@ -30,10 +30,6 @@ class PaymentWidgetProvider : AppWidgetProvider() {
             Kind.GRID_4 -> R.layout.widget_payment_2x3
             Kind.GRID_5 -> R.layout.widget_payment_2x4
         })
-        if (shape.kind == Kind.GRID_3) {
-            views.setViewVisibility(R.id.payment_row_1, View.VISIBLE)
-            views.setViewVisibility(R.id.payment_row_2, View.VISIBLE)
-        }
         val apps = paymentApps(context).take(shape.capacity)
         // A strip always uses the same five-cell layout. Reset every cell when the widget
         // shrinks so slots that were visible at a wider size cannot remain stale.
@@ -55,10 +51,6 @@ class PaymentWidgetProvider : AppWidgetProvider() {
             } else {
                 views.setViewVisibility(tile, View.VISIBLE)
                 views.setTextViewText(LABEL_IDS[index], app.label)
-                views.setTextViewTextSize(
-                    LABEL_IDS[index], android.util.TypedValue.COMPLEX_UNIT_SP,
-                    if (shape.kind == Kind.GRID_3) 8f else 10f,
-                )
                 app.icon?.let { views.setImageViewBitmap(ICON_IDS[index], it) }
                     ?: views.setImageViewResource(ICON_IDS[index], R.drawable.ic_mark)
                 views.setOnClickPendingIntent(tile, launchPayment(context, id, app.packageName))

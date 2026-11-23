@@ -24,16 +24,19 @@ class BreatherControlsTest {
 
     @Before fun reset() = BreatherTestSupport.reset()
 
-    @Test fun `four breather controls use a two by two grid`() {
+    @Test fun `start is a full width action above its secondary controls`() {
         val activity = build()
         val daily = button(activity, "Daily allowance")
         val start = button(activity, "Start a breather")
         val cooldown = button(activity, "Cooldown: off")
         val history = button(activity, "History")
-        assertTrue(daily.parent === start.parent)
+        val controls = start.parent as LinearLayout
+        assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, start.layoutParams.width)
+        assertEquals(LinearLayout.VERTICAL, controls.orientation)
+        assertTrue(controls.indexOfChild(start) < controls.indexOfChild(daily))
         assertTrue(cooldown.parent === history.parent)
-        assertTrue(daily.parent !== cooldown.parent)
-        assertEquals(LinearLayout.HORIZONTAL, (daily.parent as LinearLayout).orientation)
+        assertEquals(LinearLayout.HORIZONTAL, (cooldown.parent as LinearLayout).orientation)
+        assertTrue(listOf(start, daily, cooldown, history).all { it.minimumHeight >= Ui(context).dp(48) })
     }
 
     @Test fun `daily allowance editor clearly applies tomorrow and locks after saving`() {

@@ -30,18 +30,30 @@ object BreatherControls {
 
     fun build(activity: Activity, onChanged: () -> Unit): View {
         val ui = Ui(activity)
-        val column = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
+        val column = ui.card(16).apply {
             tag = "breather-controls"
         }
         fun render() {
             column.removeAllViews()
             val remaining = Breather.remainingMs(activity)
             val budget = BreatherBudget.status(activity)
-            column.addView(ui.section("BREATHER"))
-            column.addView(ui.text(if (budget == null) "Allowance unavailable" else "Remaining today: ${budget.available} min", 20f, strong = true).apply {
+            column.addView(LinearLayout(activity).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                addView(ui.badge(R.drawable.ic_pause))
+                addView(ui.display("Breather", 23f).apply {
+                    isAccessibilityHeading = true
+                    setPaddingRelative(ui.dp(12), 0, 0, 0)
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            })
+            column.addView(ui.space(10))
+            column.addView(ui.text(if (budget == null) "Allowance unavailable" else "Remaining today: ${budget.available} min", 17f, strong = true).apply {
                 accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             })
+            if (budget != null && budget.dailyLimit > 0) {
+                column.addView(ui.space(8))
+                column.addView(ui.meter().apply { progress = budget.available * 1000 / budget.dailyLimit })
+                column.addView(ui.space(5))
+            }
             column.addView(ui.note(if (budget == null) "Breathers and restriction changes are temporarily locked while the daily allowance cannot be verified. After a reboot, leave the phone on to allow the safety check to finish."
                 else "Daily allowance: ${budget.dailyLimit} min").apply {
                 setPadding(0, ui.dp(2), 0, 0)
@@ -49,15 +61,7 @@ object BreatherControls {
             if (budget != null && remaining > 0) column.addView(ui.note("Breather active · ${(remaining + 59_999L) / 60_000L} min left"))
             else if (budget != null && budget.cooldownRemainingMs > 0) column.addView(ui.note("Cooldown: ${(budget.cooldownRemainingMs + 59_999L) / 60_000L} min left"))
             column.addView(ui.space(14))
-            val actions = LinearLayout(activity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                tag = "breather-actions"
-            }
-            actions.addView(ui.secondary("Daily allowance") { chooseDailyAllowance(activity) { render(); onChanged() } }.apply {
-                isEnabled = budget != null && budget.dailyChanged.not()
-                contentDescription = "Set tomorrow's daily breather allowance"
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = ui.dp(4) })
-            actions.addView(ui.primary(if (remaining > 0) "Extend breather" else "Start a breather") {
+            column.addView(ui.primary(if (remaining > 0) "Extend breather" else "Start a breather") {
                 if (!Auth.available(activity)) {
                     authenticationRequired(activity)
                 } else {
@@ -66,21 +70,26 @@ object BreatherControls {
                         onChanged()
                     }
                 }
-            }.apply { isEnabled = budget != null && budget.available > 0 && budget.cooldownRemainingMs == 0L }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = ui.dp(4) })
-            column.addView(actions)
+            }.apply { isEnabled = budget != null && budget.available > 0 && budget.cooldownRemainingMs == 0L },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            column.addView(ui.space(8))
+            column.addView(ui.secondary("Daily allowance") { chooseDailyAllowance(activity) { render(); onChanged() } }.apply {
+                isEnabled = budget != null && budget.dailyChanged.not()
+                contentDescription = "Set tomorrow's daily breather allowance"
+            })
             val secondaryActions = LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 tag = "breather-secondary-actions"
             }
-            secondaryActions.addView(ui.secondary(if (budget?.cooldownEnabled == true) "Cooldown: on" else "Cooldown: off") {
-                val current = budget ?: return@secondary
+            secondaryActions.addView(ui.quiet(if (budget?.cooldownEnabled == true) "Cooldown: on" else "Cooldown: off") {
+                val current = budget ?: return@quiet
                 if (BreatherBudget.setCooldown(activity, !current.cooldownEnabled)) { render(); onChanged() }
                 else Toast.makeText(activity, "Cooldown can be changed before today's first breather.", Toast.LENGTH_LONG).show()
             }.apply {
                 isEnabled = budget != null && budget.used == 0 && budget.cooldownRemainingMs == 0L
                 contentDescription = "15 minute cooldown ${if (budget?.cooldownEnabled == true) "on" else "off"}"
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = ui.dp(4) })
-            secondaryActions.addView(ui.secondary("History") { showHistory(activity) }.apply {
+            secondaryActions.addView(ui.quiet("History") { showHistory(activity) }.apply {
                 contentDescription = "Today's breather history"
                 isEnabled = budget != null
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = ui.dp(4) })

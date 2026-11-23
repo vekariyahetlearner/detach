@@ -3,13 +3,13 @@ package io.github.detach
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -27,7 +27,7 @@ class FocusActivity : Activity() {
         override fun run() {
             val left = FocusSession.remainingMs(this@FocusActivity)
             if (left == 0L) { showComplete(); return }
-            remaining.text = "%d:%02d remaining".format(left / 60_000, (left / 1_000) % 60)
+            remaining.text = FocusSession.remainingLabel(left)
             clock.text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
             handler.postDelayed(this, 1_000L - System.currentTimeMillis() % 1_000L)
         }
@@ -37,14 +37,13 @@ class FocusActivity : Activity() {
         super.onCreate(state)
         // Kept only to drain task-stack entries created by pre-overlay builds.
         if (DetachService.isRunning) { finish(); return }
-        immersive()
         if (!FocusSession.active(this)) { finish(); return }
         renderFocus()
     }
 
     override fun onResume() {
         super.onResume()
-        if (DetachService.isRunning) { finish(); return }
+        if (DetachService.isRunning || !::remaining.isInitialized) { finish(); return }
         active = true; immersive(); handler.removeCallbacks(tick); tick.run()
     }
     override fun onPause() { active = false; handler.removeCallbacks(tick); super.onPause() }
@@ -52,12 +51,12 @@ class FocusActivity : Activity() {
     @Deprecated("Deprecated in Java") override fun onBackPressed() { /* Focus home intentionally has no back route. */ }
 
     private fun immersive() {
-        // Some framework test windows do not create a decor view until after setContentView.
-        runCatching {
-            // Keep the status bar: notifications remain visible. Hide only navigation, and do
-            // not opt into transient swipe-reveal bars that make Focus look dismissible.
-            window.insetsController?.hide(WindowInsets.Type.navigationBars())
-            window.insetsController?.systemBarsBehavior = WindowInsetsController.BEHAVIOR_DEFAULT
+        // Keep the status bar visible so the notifications gesture remains available.
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.decorView.windowInsetsController?.hide(WindowInsets.Type.navigationBars())
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE
         }
     }
 
@@ -73,11 +72,7 @@ class FocusActivity : Activity() {
         root.addView(remaining)
         root.addView(ui.text("Only selected apps are available.", 15f, ui.sub).apply { gravity = Gravity.CENTER; setPadding(0, ui.dp(10), 0, ui.dp(20)) })
         val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        // OEMs commonly ship both AOSP/Motorola and Google variants of Phone or Contacts.
-        // Show one useful tile per visible app name, while retaining the selected package behind it.
-        val apps = Settings(this).focusAllowedPackages.mapNotNull { packageName -> app(packageName) }
-            .sortedBy { it.name.lowercase(Locale.getDefault()) }
-            .distinctBy { it.name.lowercase(Locale.getDefault()) }
+        val apps = FocusAppPicker.allowedApps(this)
         if (apps.isEmpty()) grid.addView(ui.text("No selected apps are installed.", 15f, ui.sub).apply { gravity = Gravity.CENTER })
         apps.chunked(2).forEach { rowApps ->
             val row = LinearLayout(this).apply { gravity = Gravity.CENTER; orientation = LinearLayout.HORIZONTAL }
@@ -92,24 +87,20 @@ class FocusActivity : Activity() {
         setContentView(root)
     }
 
-    private data class FocusApp(val packageName: String, val name: String, val icon: android.graphics.drawable.Drawable)
-
-    private fun app(packageName: String): FocusApp? = runCatching {
-        val info = packageManager.getApplicationInfo(packageName, 0)
-        FocusApp(packageName, packageManager.getApplicationLabel(info).toString(), packageManager.getApplicationIcon(info))
-    }.getOrNull()
-
-    private fun tile(app: FocusApp): View {
+    private fun tile(app: PaymentAppPicker.App): View {
         val ui = Ui(this)
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; isClickable = true; isFocusable = true
             background = ui.ripple(ui.surface, ui.line); contentDescription = "Open ${app.name}"
-            addView(ImageView(this@FocusActivity).apply { setImageDrawable(app.icon) }, LinearLayout.LayoutParams(ui.dp(42), ui.dp(42)))
+            addView(ImageView(this@FocusActivity).apply {
+                setImageDrawable(runCatching { packageManager.getApplicationIcon(app.info) }.getOrElse { packageManager.defaultActivityIcon })
+            }, LinearLayout.LayoutParams(ui.dp(42), ui.dp(42)))
             addView(ui.text(app.name, 14f, strong = true).apply { gravity = Gravity.CENTER; maxLines = 2; setPadding(0, ui.dp(10), 0, 0) })
             setOnClickListener {
-                packageManager.getLaunchIntentForPackage(app.packageName)?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)?.let {
-                    FocusLaunchGate.begin(app.packageName)
-                    startActivity(it)
+                FocusAppPicker.launchIntent(packageManager, app.info.packageName)?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)?.let {
+                    runCatching { startActivity(it) }.onFailure {
+                        android.widget.Toast.makeText(this@FocusActivity, "Couldn’t open ${app.name}.", android.widget.Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         }

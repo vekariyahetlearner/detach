@@ -3,9 +3,8 @@ package io.github.detach
 import android.os.SystemClock
 
 /**
- * Bridges the short period between tapping a Focus tile and Android delivering the target app's
- * first window event. Without this, the accessibility service sees Detach/SystemUI in the middle
- * of a legitimate launch and sends the user straight back to Focus.
+ * Keeps repeated taps from starting multiple apps while Android brings a Focus tile's app
+ * to the foreground. Focus remains visible over the source window during the handoff.
  */
 object FocusLaunchGate {
     // Cold starts (especially WhatsApp after force-stop/reboot) can take several seconds before

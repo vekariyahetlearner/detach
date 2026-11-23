@@ -1,49 +1,65 @@
 package io.github.detach
 
 import android.app.Activity
-import android.app.AlertDialog
-import android.view.ViewGroup
-import android.widget.CheckBox
-import android.widget.LinearLayout
-import android.widget.ScrollView
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.provider.ContactsContract
+import android.telecom.TelecomManager
 
-/** Reuses the installed-app discovery already used by the payment picker, but saves an allowlist. */
+@Suppress("DEPRECATION")
 object FocusAppPicker {
     fun show(activity: Activity, saved: () -> Unit) {
-        val current = Settings(activity).focusAllowedPackages
-        val apps = PaymentAppPicker.loadApps(activity.packageManager, activity.packageName, current, blocking = true)
-        val selected = current.toMutableSet()
-        val ui = Ui(activity)
-        val rows = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(ui.dp(20), 0, ui.dp(20), 0)
-        }
-        val checks = mutableListOf<CheckBox>()
-        apps.forEach { app ->
-            val check = CheckBox(activity).apply {
-                text = app.name; textSize = 16f; isChecked = app.info.packageName in selected
-                minHeight = ui.dp(52); setPadding(0, 0, 0, 0)
-                setOnCheckedChangeListener { _, checked -> if (checked) selected.add(app.info.packageName) else selected.remove(app.info.packageName) }
-            }
-            checks += check
-            rows.addView(check, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        }
-        val content = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(ui.note("Select only the apps you need. Links to any other app return to Focus.").apply { setPadding(ui.dp(20), 0, ui.dp(20), ui.dp(8)) })
-            addView(ui.quiet("Clear selection") {
-                selected.clear()
-                checks.forEach { it.isChecked = false }
-            }.apply { setPadding(ui.dp(12), 0, ui.dp(12), 0) })
-            addView(ScrollView(activity).apply { addView(rows) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ui.dp(420)))
-        }
-        AlertDialog.Builder(activity)
-            .setTitle("Allowed during Focus")
-            .setView(content)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Save") { _, _ ->
-                Settings(activity).focusAllowedPackages = selected
-                saved()
-            }.create().also { dialog -> dialog.setOnShowListener { Ui(activity).style(dialog) }; dialog.show() }
+        if (!FocusSession.active(activity)) PaymentAppPicker.showFocusApps(activity, saved)
     }
+
+    internal fun pickableApps(context: Context, saved: Set<String>): List<PaymentAppPicker.App> {
+        val settings = Settings(context)
+        val manager = context.packageManager
+        val apps = PaymentAppPicker.loadApps(manager, context.packageName, saved, blocking = true).filter { app ->
+            val packageName = app.info.packageName
+            settings.canAllowInFocus(packageName) && launchIntent(manager, packageName) != null
+        }
+        return collapseEssentialAliases(context, settings, apps)
+    }
+
+    internal fun allowedApps(context: Context): List<PaymentAppPicker.App> {
+        val settings = Settings(context)
+        val apps = PaymentAppPicker.appsFromPackages(context.packageManager, settings.focusAllowedPackages, blocking = true)
+            .filter { launchIntent(context.packageManager, it.info.packageName) != null }
+        return collapseEssentialAliases(context, settings, apps)
+    }
+
+    private fun collapseEssentialAliases(
+        context: Context,
+        settings: Settings,
+        apps: List<PaymentAppPicker.App>,
+    ): List<PaymentAppPicker.App> {
+        // Keep separate apps with identical names. Collapse only known essential variants
+        // that show the same name, while leaving both packages on the allowlist for calls.
+        return apps.groupBy { app ->
+            val packageName = app.info.packageName
+            (settings.focusEssential(packageName)?.name ?: packageName) to app.searchName
+        }.values.map { aliases ->
+            val first = aliases.first()
+            if (aliases.size == 1) first else {
+                val preferredPackage = runCatching {
+                    when (settings.focusEssential(first.info.packageName)) {
+                        Settings.FocusEssential.PHONE ->
+                            context.getSystemService(TelecomManager::class.java)?.defaultDialerPackage
+                        Settings.FocusEssential.CONTACTS -> context.packageManager.resolveActivity(
+                            Intent(Intent.ACTION_VIEW, ContactsContract.Contacts.CONTENT_URI),
+                            PackageManager.MATCH_DEFAULT_ONLY,
+                        )?.activityInfo?.packageName
+                        else -> null
+                    }
+                }.getOrNull()
+                aliases.firstOrNull { it.info.packageName == preferredPackage } ?: first
+            }
+        }
+    }
+
+    internal fun launchIntent(manager: PackageManager, packageName: String): Intent? = runCatching {
+        manager.getLaunchIntentForPackage(packageName) ?: manager.getLeanbackLaunchIntentForPackage(packageName)
+    }.getOrNull()
 }

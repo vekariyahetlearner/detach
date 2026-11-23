@@ -40,8 +40,6 @@ class DetachService : AccessibilityService() {
     private val guardRevision = AtomicLong()
     @Volatile private var coverPackage: String? = null
     @Volatile private var guardPackage: String? = null
-    @Volatile private var lastFocusRedirect = 0L
-    @Volatile private var focusMayRestore = false
 
     private val main = Handler(Looper.getMainLooper())
     private lateinit var thread: HandlerThread
@@ -83,18 +81,17 @@ class DetachService : AccessibilityService() {
         }
     }
 
-    private val focusReturnCheck = Runnable {
-        if (!pausing && FocusSession.active(this)) {
-            val pkg = foreground()
-            if (pkg != null && pkg !in Targets.SYSTEM_UI && !focusAllows(pkg) && !FocusLaunchGate.awaiting()) showFocusHome()
-        }
-    }
-
     private val focusRestoreWatchdog = object : Runnable {
         override fun run() {
-            if (pausing || !FocusSession.active(this@DetachService)) return
-            val pkg = foreground()
-            if (focusMayRestore && pkg != null && pkg !in Targets.SYSTEM_UI && !focusAllows(pkg) && !FocusLaunchGate.awaiting()) showFocusHome()
+            if (pausing) return
+            if (!FocusSession.active(this@DetachService)) {
+                FocusLaunchGate.clear()
+                focusHome.clear()
+                updateEventFilter()
+                requestEval(immediate = true)
+                return
+            }
+            syncFocusHome()
             main.postDelayed(this, 180)
         }
     }
@@ -124,7 +121,8 @@ class DetachService : AccessibilityService() {
         }
         settings = Settings(this)
         val startupPackage = foreground()
-        if (startupPackage !in settings.blockedPackages && Pause.shouldAutoPausePayment(this, startupPackage) && Pause.begin(this, startupPackage)) {
+        if (!FocusSession.active(this) && startupPackage !in settings.blockedPackages &&
+            Pause.shouldAutoPausePayment(this, startupPackage) && Pause.begin(this, startupPackage)) {
             stopProtection()
             disableSelf()
             return
@@ -136,7 +134,6 @@ class DetachService : AccessibilityService() {
         lock = Lock(this)
         guard = GuardOverlay(this, onUnlock = { openUnlock() }, onGoBack = { leaveProtectedPage() })
         focusHome = FocusOverlay(this)
-        if (FocusSession.active(this)) { focusMayRestore = true; main.post(focusRestoreWatchdog) }
         thread = HandlerThread("detach").also { it.start() }
         worker = Handler(thread.looper)
         updateEventFilter()
@@ -156,6 +153,7 @@ class DetachService : AccessibilityService() {
 
         pausing = false
         instance = this
+        if (FocusSession.active(this)) main.post(focusRestoreWatchdog)
         // Running again: any pause is over, and the "on" notification goes (back) up.
         Pause.onServiceStarted(this)
         refreshBreather()
@@ -166,7 +164,7 @@ class DetachService : AccessibilityService() {
      * takes down the overlays and switches this service off. Main thread only.
      */
     private fun pauseNow(paymentPackage: String? = null): Boolean {
-        if (pausing) return false
+        if (pausing || FocusSession.active(this)) return false
         if (!Pause.begin(this, paymentPackage)) {
             if (paymentPackage != null) onInterrupt()
             return false
@@ -215,7 +213,8 @@ class DetachService : AccessibilityService() {
         if (::worker.isInitialized) worker.removeCallbacksAndMessages(null)
         if (::cover.isInitialized) cover.hide()
         if (::guard.isInitialized) guard.hide()
-        if (::focusHome.isInitialized) focusHome.hide()
+        if (::focusHome.isInitialized) focusHome.clear()
+        FocusLaunchGate.clear()
         coverState.clear()
         pending = null
         pendingPackage = null
@@ -238,40 +237,9 @@ class DetachService : AccessibilityService() {
         val pkg = event.packageName?.toString() ?: return
         if (pausing || !::worker.isInitialized) return
         if (FocusSession.active(this)) {
-            // Any event from an allowed app wins immediately. This deliberately gives selected
-            // apps priority over the Focus surface, including long-running/quiet screens.
-            if (pkg in settings.focusAllowedPackages) {
-                // An allowed app is authoritative: cancel a stale post-shade check before it
-                // can put the lock back above WhatsApp/Contacts/another selected app.
-                main.removeCallbacks(focusReturnCheck)
-                focusMayRestore = false
-                hideFocusHome()
-                return
-            }
-            // Focus used to inspect every content-change event from every installed app. That
-            // made typing and scrolling lag. A foreground/window transition is sufficient to
-            // enforce the allowlist, so all in-app events are ignored here.
-            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-                when {
-                    // The selected app won the handoff. No other package receives this grace.
-                    FocusLaunchGate.accepts(pkg) -> { FocusLaunchGate.clear(); focusMayRestore = false; main.removeCallbacks(focusReturnCheck); hideFocusHome() }
-                    // Detach pauses while an allowed tile is launching and Android may surface
-                    // SystemUI for a frame. Neither is an escape route during this tiny window.
-                    FocusLaunchGate.awaiting() && (pkg == packageName || pkg in Targets.SYSTEM_UI) -> Unit
-                    // Let the notification shade sit above everything. Once it closes, check
-                    // the actual foreground package after the SystemUI transition settles.
-                    (pkg in Targets.SYSTEM_UI || pkg == currentImePackage()) -> {
-                        // Keyboard/IME events are SystemUI too. If an allowed app is active it
-                        // has already set focusMayRestore=false, so do not arm a restore over it.
-                        if (focusMayRestore) {
-                            hideFocusHome()
-                            main.removeCallbacks(focusReturnCheck)
-                            main.postDelayed(focusReturnCheck, 260)
-                        }
-                    }
-                    !focusAllows(pkg) -> { focusMayRestore = true; showFocusHome() }
-                }
-            }
+            // A keyboard or a background app can emit a window event. The active window
+            // determines what to cover. The watchdog catches transitions Android doesn't report.
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) syncFocusHome()
             return
         }
         val activePackage = foreground()
@@ -328,39 +296,30 @@ class DetachService : AccessibilityService() {
         requestEval(immediate = windowChanged, gap = gap)
     }
 
-    /** The Focus activity and its selected launchable packages are the entire navigation model. */
-    private fun focusAllows(packageName: String): Boolean =
-        packageName in settings.focusAllowedPackages || (packageName == this.packageName && FocusActivity.active)
-
-    /** Gboard and OEM keyboards are separate packages, not com.android.systemui. */
-    private fun currentImePackage(): String? = android.provider.Settings.Secure.getString(
-        contentResolver, android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
-    )?.substringBefore('/')
-
-    private fun showFocusHome() {
-        val now = SystemClock.uptimeMillis()
-        if (now - lastFocusRedirect < 400L) return
-        lastFocusRedirect = now
-        main.post {
-            // A queued launcher/SystemUI event must never repaint Focus over an allowed app.
-            if (!pausing && FocusSession.active(this) && focusMayRestore) focusHome.show()
+    private fun syncFocusHome() {
+        if (!::focusHome.isInitialized) return
+        val pkg = foreground() ?: return
+        when {
+            pkg in settings.focusAllowedPackages -> {
+                FocusLaunchGate.clear()
+                focusHome.hide()
+            }
+            pkg in Targets.SYSTEM_UI -> focusHome.hide()
+            pkg == currentImePackage() -> Unit
+            else -> focusHome.show()
         }
     }
 
-    private fun hideFocusHome() { main.post { if (::focusHome.isInitialized) focusHome.hide() } }
-
-    /** Called before a selected tile launches, so Focus cannot race back over that app. */
-    internal fun onFocusAllowedLaunch() {
-        focusMayRestore = false
-        main.removeCallbacks(focusReturnCheck)
-        hideFocusHome()
-    }
+    /** IMEs such as Gboard have their own packages. They don't replace the foreground app. */
+    private fun currentImePackage(): String? = android.provider.Settings.Secure.getString(
+        contentResolver, android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+    )?.substringBefore('/')
 
     /** Package of the focused window. Only the name is read, never its content. */
     private fun foreground(): String? = rootInActiveWindow?.packageName?.toString()
 
     private fun pauseIfPayment(pkg: String?): Boolean {
-        if (!Pause.shouldAutoPausePayment(this, pkg)) return false
+        if (FocusSession.active(this) || !Pause.shouldAutoPausePayment(this, pkg)) return false
         if (Looper.myLooper() == Looper.getMainLooper()) {
             if (foreground() == pkg) pauseNow(pkg)
         } else {
@@ -390,6 +349,13 @@ class DetachService : AccessibilityService() {
 
     private fun evaluate() {
         if (pausing) return
+        if (FocusSession.active(this)) {
+            if (coverOn) hideCover()
+            if (guardOn) hideGuard()
+            pending = null
+            pendingPackage = null
+            return
+        }
         val root = rootInActiveWindow
         // Only the package name is looked at here; anything that isn't Instagram/YouTube is ignored.
         val pkg = root?.packageName?.toString()
@@ -764,10 +730,9 @@ class DetachService : AccessibilityService() {
 
         /** Shows the Focus home without adding a normal Activity to Recents. */
         fun openFocusHome() { instance?.let { service ->
-            service.focusMayRestore = true
-            service.showFocusHome()
+            service.focusHome.show()
             service.main.removeCallbacks(service.focusRestoreWatchdog)
-            service.main.post(service.focusRestoreWatchdog)
+            service.main.postDelayed(service.focusRestoreWatchdog, 180)
         } }
     }
 

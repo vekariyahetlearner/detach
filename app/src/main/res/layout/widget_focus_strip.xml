@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@id/focus_widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_focus_background"
+    android:gravity="center"
+    android:orientation="horizontal"
+    android:paddingHorizontal="9dp"
+    android:paddingVertical="5dp">
+
+    <ImageView
+        android:layout_width="30dp"
+        android:layout_height="30dp"
+        android:background="@drawable/widget_focus_action"
+        android:importantForAccessibility="no"
+        android:padding="6dp"
+        android:src="@drawable/ic_sessions"
+        android:tint="@color/on_accent" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="7dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@id/focus_widget_label"
+            android:layout_width="match_parent"
+            android:layout_height="15dp"
+            android:autoSizeMaxTextSize="12sp"
+            android:autoSizeMinTextSize="8sp"
+            android:autoSizeStepGranularity="1sp"
+            android:autoSizeTextType="uniform"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center_vertical|start"
+            android:importantForAccessibility="no"
+            android:includeFontPadding="false"
+            android:maxLines="1"
+            android:text="@string/focus_widget_title"
+            android:textColor="@color/secondary_ink" />
+
+        <TextView
+            android:id="@+id/focus_widget_time"
+            android:layout_width="match_parent"
+            android:layout_height="21dp"
+            android:autoSizeMaxTextSize="20sp"
+            android:autoSizeMinTextSize="8sp"
+            android:autoSizeStepGranularity="1sp"
+            android:autoSizeTextType="uniform"
+            android:fontFamily="sans-serif-medium"
+            android:fontFeatureSettings="tnum"
+            android:gravity="center_vertical|start"
+            android:importantForAccessibility="no"
+            android:includeFontPadding="false"
+            android:maxLines="1"
+            android:text="@string/focus_widget_default_time"
+            android:textColor="@color/ink"
+            android:textDirection="ltr" />
+    </LinearLayout>
+</LinearLayout>

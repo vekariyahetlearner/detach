@@ -11,7 +11,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Fingerprint as an alternative to the Detach password. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
-    <!-- Only to restore a payment reminder after a reboot, never to resume protection. -->
+    <!-- Restores payment reminders and scheduled screen-time archive jobs. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!--
       Optional, and never granted by installing: the owner grants it once over adb. Used for one
@@ -51,6 +51,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".FocusWidgetActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Detach.Dialog" />
 
         <activity
             android:name=".FocusActivity"
@@ -103,6 +111,26 @@
         </receiver>
 
         <receiver
+            android:name=".UsageArchiveClockReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".FocusWidgetProvider"
+            android:exported="false"
+            android:label="@string/focus_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/focus_widget_info" />
+        </receiver>
+
+        <receiver
             android:name=".PaymentWidgetProvider"
             android:exported="false"
             android:label="Payment apps">
@@ -114,6 +142,11 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/payment_widget_info" />
         </receiver>
+
+        <service
+            android:name=".UsageArchiveService"
+            android:exported="true"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <service
             android:name=".PauseForegroundMonitor"

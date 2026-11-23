@@ -15,7 +15,6 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.NumberPicker
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
@@ -23,15 +22,26 @@ import android.provider.Settings as SysSettings
 
 @Suppress("DEPRECATION")
 class MainActivity : Activity() {
+    private enum class Page(val label: String, val description: String, val icon: Int) {
+        SESSIONS("Sessions", "Start Focus or take a breather.", R.drawable.ic_sessions),
+        LIMITS("Limits", "Keep the parts of your apps you came for.", R.drawable.ic_limits),
+        SCREEN_TIME("Screen time", "Where your attention goes.", R.drawable.ic_screen_time),
+        PAYMENTS("Payments", "Pause protection when you need to pay.", R.drawable.ic_payments),
+        SETTINGS("Settings", "Permissions, protection, and backups.", R.drawable.ic_settings),
+    }
+
     private lateinit var settings: Settings
     private lateinit var lock: Lock
     private lateinit var root: LinearLayout
     private lateinit var scroll: ScrollView
+    private lateinit var navigation: LinearLayout
     private val ui by lazy { Ui(this) }
     private var unlocked = false
     private var silent = false
     private var rendered = false
-    private var restoredScroll = 0
+    private var page = Page.SESSIONS
+    private val pageScroll = mutableMapOf<Page, Int>()
+    private var pageChanged = true
     private var revealDiagnostics = false
     private var lastStatus: String? = null
     private var pendingPreDraw: ViewTreeObserver.OnPreDrawListener? = null
@@ -39,48 +49,66 @@ class MainActivity : Activity() {
     private val protectedDialogs = mutableSetOf<AlertDialog>()
     private var authorizationVisit = 0L
     private var visitActive = false
-    private var whatsNewDialog: AlertDialog? = null
+    private var backCallback: android.window.OnBackInvokedCallback? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = Settings(this)
         lock = Lock(this)
         expanded.addAll(savedInstanceState?.getStringArrayList("expanded") ?: emptyList())
-        restoredScroll = savedInstanceState?.getInt("scroll") ?: 0
+        page = Page.entries.find { it.name == savedInstanceState?.getString("page") } ?: Page.SESSIONS
+        Page.entries.forEach { pageScroll[it] = savedInstanceState?.getInt("scroll-${it.name}") ?: 0 }
         revealDiagnostics = savedInstanceState?.getBoolean("revealDiagnostics") ?: (intent?.action == Health.ACTION_DIAGNOSTICS)
-        if (revealDiagnostics) expanded.add("diagnostic-info")
+        if (revealDiagnostics) {
+            page = Page.SETTINGS
+            expanded.add("diagnostic-info")
+        }
         ui.systemBars(window)
         window.decorView.setBackgroundColor(ui.bg)
         root = column().apply {
-            val side = maxOf(ui.dp(24), (resources.displayMetrics.widthPixels - ui.dp(640)) / 2)
-            setPadding(side, ui.dp(20), side, ui.dp(32))
+            val side = maxOf(ui.dp(20), ui.dp((resources.configuration.screenWidthDp - 640) / 2))
+            setPadding(side, ui.dp(18), side, ui.dp(24))
         }
         scroll = ScrollView(this).apply {
             isFillViewport = true
             isSaveEnabled = false
             clipToPadding = false
+            isVerticalScrollBarEnabled = false
             addView(root)
+        }
+        navigation = LinearLayout(this).apply {
+            setPadding(ui.dp(5), ui.dp(5), ui.dp(5), ui.dp(5))
+            background = ui.shape(ui.surface, ui.line, 22)
+        }
+        val shell = column().apply {
+            setBackgroundColor(ui.bg)
+            addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            val side = maxOf(ui.dp(10), ui.dp((resources.configuration.screenWidthDp - 660) / 2))
+            addView(navigation, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                marginStart = side
+                marginEnd = side
+                topMargin = ui.dp(5)
+                bottomMargin = ui.dp(6)
+            })
             setOnApplyWindowInsetsListener { view, insets ->
-                val top: Int
-                val bottom: Int
                 if (Build.VERSION.SDK_INT >= 30) {
-                    val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
-                    top = bars.top
-                    bottom = bars.bottom
+                    val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
+                    view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
                 } else {
-                    top = insets.systemWindowInsetTop
-                    bottom = insets.systemWindowInsetBottom
+                    view.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
                 }
-                view.setPadding(0, top, 0, bottom)
                 insets
             }
         }
-        setContentView(scroll)
+        setContentView(shell)
+        buildNavigation()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putStringArrayList("expanded", ArrayList(expanded))
-        outState.putInt("scroll", scroll.scrollY)
+        rememberScroll()
+        outState.putString("page", page.name)
+        pageScroll.forEach { (key, offset) -> outState.putInt("scroll-${key.name}", offset) }
         outState.putBoolean("revealDiagnostics", revealDiagnostics)
         super.onSaveInstanceState(outState)
     }
@@ -91,7 +119,79 @@ class MainActivity : Activity() {
         if (intent.action == Health.ACTION_DIAGNOSTICS) {
             expanded.add("diagnostic-info")
             revealDiagnostics = true
-            render()
+            navigate(Page.SETTINGS)
+        }
+    }
+
+    @Deprecated("Used by Android versions before predictive Back")
+    override fun onBackPressed() {
+        if (page == Page.SESSIONS) super.onBackPressed() else navigate(Page.SESSIONS)
+    }
+
+    private fun rememberScroll() {
+        if (!pageChanged && pendingPreDraw == null) pageScroll[page] = scroll.scrollY
+    }
+
+    private fun navigate(destination: Page) {
+        if (destination != page) {
+            rememberScroll()
+            page = destination
+            pageChanged = true
+            updateNavigation()
+        } else if (!revealDiagnostics) return
+        render()
+    }
+
+    private fun buildNavigation() {
+        Page.entries.forEach { destination ->
+            val item = column().apply {
+                gravity = Gravity.CENTER
+                minimumHeight = ui.dp(55)
+                setPadding(ui.dp(2), ui.dp(4), ui.dp(2), ui.dp(4))
+                isFocusable = true
+                contentDescription = destination.label
+                tag = "nav-${destination.name.lowercase(java.util.Locale.ROOT)}"
+                accessibilityDelegate = object : View.AccessibilityDelegate() {
+                    override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
+                        super.onInitializeAccessibilityNodeInfo(host, info)
+                        info.className = android.widget.Button::class.java.name
+                    }
+                }
+                addView(android.widget.FrameLayout(this@MainActivity).apply {
+                    addView(ui.icon(destination.icon, 21), android.widget.FrameLayout.LayoutParams(ui.dp(21), ui.dp(21), Gravity.CENTER))
+                }, LinearLayout.LayoutParams(ui.dp(36), ui.dp(26)))
+                addView(ui.text(destination.label, 11f, strong = true).apply {
+                    gravity = Gravity.CENTER
+                    setLineSpacing(0f, 1f)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                })
+                setOnClickListener { navigate(destination) }
+            }
+            navigation.addView(item, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                marginStart = ui.dp(2)
+                marginEnd = ui.dp(2)
+            })
+        }
+        updateNavigation()
+    }
+
+    private fun updateNavigation() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            backCallback?.let(onBackInvokedDispatcher::unregisterOnBackInvokedCallback)
+            backCallback = if (page == Page.SESSIONS) null else android.window.OnBackInvokedCallback { navigate(Page.SESSIONS) }
+            backCallback?.let {
+                onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, it)
+            }
+        }
+        Page.entries.forEachIndexed { index, destination ->
+            val item = navigation.getChildAt(index) as LinearLayout
+            val selected = destination == page
+            item.isSelected = selected
+            item.background = ui.ripple(if (selected) ui.accentSurface else android.graphics.Color.TRANSPARENT, radius = 17)
+            val indicator = item.getChildAt(0) as ViewGroup
+            (indicator.getChildAt(0) as android.widget.ImageView).imageTintList =
+                ui.colors(if (selected) ui.accent else ui.sub)
+            (item.getChildAt(1) as TextView).setTextColor(if (selected) ui.accent else ui.sub)
         }
     }
 
@@ -102,20 +202,22 @@ class MainActivity : Activity() {
 
     private val connectionTick = Runnable { render() }
     private val breatherTick = Runnable { DetachService.refreshSettings(); render() }
+    private val focusExpiry = Runnable { render() }
 
     override fun onResume() {
         super.onResume()
         visitActive = true
+        UsageArchiveJobs.schedule(this)
         Pause.resumeIfDue(this)
         Pause.refreshNotification(this)
         render()
-        showWidgetUpdateOnce()
     }
 
     override fun onPause() {
         root.removeCallbacks(pauseTick)
         root.removeCallbacks(connectionTick)
         root.removeCallbacks(breatherTick)
+        root.removeCallbacks(focusExpiry)
         super.onPause()
     }
 
@@ -131,8 +233,9 @@ class MainActivity : Activity() {
 
     private fun render() {
         pendingPreDraw?.let { root.viewTreeObserver.removeOnPreDrawListener(it) }
-        val previousY = if (rendered) scroll.scrollY else restoredScroll
-        val anchor = (0 until root.childCount).map { root.getChildAt(it) }
+        val samePage = rendered && !pageChanged && pendingPreDraw == null
+        val previousY = if (samePage) scroll.scrollY else pageScroll[page] ?: 0
+        val anchor = (0 until (if (samePage) root.childCount else 0)).map { root.getChildAt(it) }
             .firstOrNull { it.bottom > previousY && it.tag is String }
         val anchorTag = anchor?.tag
         val anchorOffset = anchor?.let { previousY - it.top } ?: 0
@@ -140,13 +243,18 @@ class MainActivity : Activity() {
         root.removeCallbacks(pauseTick)
         root.removeCallbacks(connectionTick)
         root.removeCallbacks(breatherTick)
+        root.removeCallbacks(focusExpiry)
         root.removeAllViews()
         root.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(ui.icon(R.drawable.ic_mark, 28, ui.accent))
-            addView(ui.text("Detach", 23f, strong = true).apply { setPadding(ui.dp(10), 0, 0, 0) })
+            addView(ui.badge(R.drawable.ic_mark, 32, ui.onAccent, ui.accent))
+            addView(ui.text("Detach", 16f, ui.fg, strong = true).apply { setPaddingRelative(ui.dp(9), 0, 0, 0) })
         })
-        root.addView(ui.note("Keep the useful. Leave the feed.").apply { setPadding(0, ui.dp(10), 0, ui.dp(24)) })
+        root.addView(ui.display(page.label, 38f).apply {
+            isAccessibilityHeading = true
+            setPadding(0, ui.dp(18), 0, 0)
+        })
+        root.addView(ui.note(page.description).apply { setPadding(0, ui.dp(4), 0, ui.dp(16)) })
 
         val paused = Pause.isPending(this)
         val currentStatus = when {
@@ -155,7 +263,7 @@ class MainActivity : Activity() {
             serviceEnabled() -> "connecting"
             else -> "off"
         }
-        root.addView(status(paused).apply {
+        if (page == Page.SESSIONS || paused && page == Page.PAYMENTS || currentStatus != "active" && page == Page.LIMITS) root.addView(status(paused).apply {
             tag = "status"
             if (rendered && currentStatus != lastStatus && !revealDiagnostics) Motion.enter(this)
         })
@@ -170,30 +278,45 @@ class MainActivity : Activity() {
         val resetRemaining = budget?.let { (it.periodEnd - System.currentTimeMillis()).coerceAtLeast(1L) } ?: 0L
         val nextBreatherChange = listOf(breatherRemaining, cooldownRemaining, resetRemaining).filter { it > 0 }.minOrNull()
         if (nextBreatherChange != null) root.postDelayed(breatherTick, nextBreatherChange + 1L)
-        if (!paused && !serviceEnabled()) root.addView(setup().apply { tag = "setup" })
-        else if (needsNotificationPermission()) root.addView(ui.quiet("Allow status & reminder notifications") {
-            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
-        })
-
-        root.addView(focus().apply { tag = "focus" })
-        root.addView(instagram().apply { tag = "instagram" })
-        root.addView(youtube().apply { tag = "youtube" })
-        root.addView(blockedApps().apply { tag = "blocked-apps" })
-        root.addView(column().apply {
-            tag = "breather"
-            addView(BreatherControls.build(this@MainActivity) {
-                DetachService.refreshSettings()
-                Pause.refreshNotification(this@MainActivity)
-                render()
-            })
-            addView(ui.space(20))
-            addView(ui.hairline())
-        })
-        root.addView(payments(paused).apply { tag = "payments" })
-        root.addView(protection().apply { tag = "protection" })
-        root.addView(privacy().apply { tag = "privacy" })
-        root.addView(diagnostics().apply { tag = "diagnostics" })
-        root.addView(ui.note("On your device. Under your control.").apply { setPadding(0, ui.dp(20), 0, 0) })
+        val focusRemaining = FocusSession.remainingMs(this)
+        if (focusRemaining > 0L) root.postDelayed(focusExpiry, focusRemaining)
+        when (page) {
+            Page.SESSIONS -> {
+                root.addView(ui.space(12))
+                root.addView(focus(focusRemaining > 0L).apply { tag = "focus" })
+                root.addView(ui.space(12))
+                root.addView(BreatherControls.build(this) {
+                    DetachService.refreshSettings()
+                    Pause.refreshNotification(this)
+                    render()
+                }.apply { tag = "breather" })
+            }
+            Page.LIMITS -> {
+                if (currentStatus != "active") root.addView(ui.space(12))
+                root.addView(instagram().apply { tag = "instagram" })
+                root.addView(ui.space(10))
+                root.addView(youtube().apply { tag = "youtube" })
+                root.addView(ui.space(10))
+                root.addView(blockedApps().apply { tag = "blocked-apps" })
+            }
+            Page.SCREEN_TIME -> root.addView(ScreenTimePage.build(this, ::render) {
+                open(PauseForegroundMonitor.usageAccessIntent(this))
+            }.apply { tag = "screen-time" })
+            Page.PAYMENTS -> root.addView(payments(paused).apply { tag = "payments" })
+            Page.SETTINGS -> {
+                root.addView(setup().apply { tag = "setup" })
+                root.addView(ui.space(10))
+                root.addView(protection().apply { tag = "protection" })
+                root.addView(ui.space(10))
+                root.addView(usageBackupSettings().apply { tag = "usage-backup" })
+                root.addView(ui.space(10))
+                root.addView(ui.card(14).apply {
+                    addView(privacy().apply { tag = "privacy" })
+                    addView(ui.hairline())
+                    addView(diagnostics().apply { tag = "diagnostics" })
+                })
+            }
+        }
 
         val animateReveal = rendered && Motion.enabled(this)
         pendingPreDraw = object : ViewTreeObserver.OnPreDrawListener {
@@ -204,10 +327,15 @@ class MainActivity : Activity() {
                 scroll.scrollTo(0, replacement?.let { it.top + anchorOffset } ?: previousY)
                 if (revealDiagnostics) {
                     revealDiagnostics = false
-                    val target = root.findViewWithTag<View>("diagnostics").top
-                    if (animateReveal) scroll.smoothScrollTo(0, target) else scroll.scrollTo(0, target)
+                    val position = android.graphics.Rect().also { rect ->
+                        val diagnostics = root.findViewWithTag<View>("diagnostics")
+                        diagnostics.getDrawingRect(rect)
+                        root.offsetDescendantRectToMyCoords(diagnostics, rect)
+                    }.top
+                    if (animateReveal) scroll.smoothScrollTo(0, position) else scroll.scrollTo(0, position)
                     root.findViewWithTag<View>("diagnostic-info").sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_FOCUSED)
                 }
+                pageScroll[page] = scroll.scrollY
                 return true
             }
         }
@@ -216,6 +344,89 @@ class MainActivity : Activity() {
             for (index in 0 until minOf(4, root.childCount)) Motion.enter(root.getChildAt(index), index * 24L)
         }
         rendered = true
+        pageChanged = false
+    }
+
+    private fun usageBackupSettings() = ui.card().apply {
+        addView(cardHeading(R.drawable.ic_screen_time, "Screen time backup"))
+        addView(ui.space(10))
+        val configured = UsageBackup.configured(this@MainActivity)
+        val saved = UsageBackup.lastSaved(this@MainActivity)
+        val status = when {
+            !configured -> "Choose a folder for automatic backups at local midnight. Use a synced folder or copy the files before changing phones."
+            UsageBackup.failed(this@MainActivity) -> "The last backup failed. Retry or choose another folder."
+            saved > 0L -> "Last saved ${android.text.format.DateFormat.getMediumDateFormat(this@MainActivity).format(java.util.Date(saved))}. Scheduled for local midnight. Android may delay background saves."
+            else -> "Midnight backup is enabled."
+        }
+        addView(ui.note(status).apply { setPadding(0, 0, 0, ui.dp(8)) })
+        addView(ui.secondary(if (configured) "Change backup folder" else "Choose backup folder") {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+            ), BACKUP_FOLDER)
+        })
+        if (configured) {
+            addView(ui.quiet("Back up now") {
+                backupAction {
+                    UsageArchiveJobs.collect(it)
+                    if (UsageBackup.save(it, force = true)) "Screen time backup saved." else "Couldn’t save the backup. Check the folder."
+                }
+            })
+            addView(ui.quiet("Stop daily backups") {
+                backupAction {
+                    UsageBackup.disable(it)
+                    UsageArchiveJobs.schedule(it)
+                    "Daily backups stopped. Existing files were kept."
+                }
+            })
+        }
+        addView(ui.quiet("Restore screen time backup") {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), BACKUP_RESTORE)
+        })
+        addView(ui.note("Restore merges daily totals without counting them twice. Backups contain app names and usage totals.").apply {
+            setPadding(0, ui.dp(4), 0, ui.dp(12))
+        })
+    }
+
+    @Deprecated("Activity result from the system file picker")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK || requestCode !in setOf(BACKUP_FOLDER, BACKUP_RESTORE)) return
+        val result = data ?: return
+        val uri = result.data?.takeIf { it.scheme == "content" } ?: return
+        if (requestCode == BACKUP_FOLDER) {
+            if (runCatching {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }.isFailure) {
+                toast("Couldn’t keep access to that backup folder.")
+                return
+            }
+            backupAction {
+                UsageBackup.configure(it, uri)
+                UsageArchiveJobs.collect(it)
+                val saved = UsageBackup.save(it, force = true)
+                UsageArchiveJobs.schedule(it)
+                if (saved) "Midnight backup enabled." else "Couldn’t write to the chosen folder."
+            }
+        } else {
+            backupAction {
+                val count = UsageBackup.restore(it, uri)
+                "Backup merged. $count daily app records checked."
+            }
+        }
+    }
+
+    private fun backupAction(action: (android.content.Context) -> String) {
+        val app = applicationContext
+        UsageArchiveJobs.worker.execute {
+            val message = runCatching { action(app) }.getOrDefault("Couldn’t read this backup. Existing history was kept.")
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) {
+                    toast(message)
+                    if (visitActive) render()
+                }
+            }
+        }
     }
 
     private fun status(paused: Boolean): View {
@@ -226,27 +437,34 @@ class MainActivity : Activity() {
             paused -> "Protection is paused"
             active -> "Protection is on"
             connecting -> "Waiting for Android"
-            else -> "Ready when you are"
+            else -> "Protection is off"
         }
         val detail = when {
             paused && serviceEnabled() -> "Resume requested. Waiting for Android to reconnect; protection is not confirmed yet."
             paused && Pause.isExpired(this) -> "The pause timer is due. If automatic resume is unavailable or delayed, use Resume protection."
             paused && Pause.canSelfEnable(this) -> "Automatic resume after ${Pause.untilText(this)}. You can resume sooner below."
-            paused -> "Reminder at ${Pause.untilText(this)}. Automatic resume needs the optional USB setup below."
+            paused -> "Reminder at ${Pause.untilText(this)}. Automatic resume needs the optional USB setup in Payments."
             active && Breather.remainingMs(this) > 0 -> "Your breather is on. Instagram and YouTube are unblocked until it ends."
-            active -> "Your app choices below are being applied."
+            active -> null
             connecting -> "Accessibility is enabled, but the service hasn’t connected yet. Protection is not confirmed."
             else -> "One Android permission to get started."
         }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(View(this@MainActivity).apply { setBackgroundColor(color) }, LinearLayout.LayoutParams(ui.dp(3), ViewGroup.LayoutParams.MATCH_PARENT))
+        return ui.card(12).apply {
+            addView(LinearLayout(this@MainActivity).apply {
+                gravity = Gravity.TOP
+                addView(ui.badge(if (paused) R.drawable.ic_pause else R.drawable.ic_shield, 32, color))
+                addView(column().apply {
+                    setPaddingRelative(ui.dp(10), ui.dp(3), 0, 0)
+                    addView(ui.text(title, 15f, strong = true).apply { isAccessibilityHeading = true })
+                    if (detail != null) addView(ui.note(detail))
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            })
             addView(column().apply {
-                setPadding(ui.dp(16), ui.dp(2), 0, ui.dp(2))
-                addView(ui.text(title, 23f, strong = true).apply { isAccessibilityHeading = true })
-                addView(ui.note(detail).apply { setPadding(0, ui.dp(8), 0, 0) })
                 if (connecting) addView(ui.quiet("Check Accessibility settings") {
                     open(Intent(SysSettings.ACTION_ACCESSIBILITY_SETTINGS))
+                })
+                if (!active && !connecting && !paused) addView(ui.quiet("Set up protection") {
+                    navigate(Page.SETTINGS)
                 })
                 if (paused) {
                     addView(ui.space(14))
@@ -262,17 +480,17 @@ class MainActivity : Activity() {
                     addView(ui.note(if (Pause.canSelfEnable(this@MainActivity)) "The timer can also resume protection. Optional app detection is configured under Payments."
                         else "Opens Accessibility. Turn Use Detach on within 3 minutes of tapping Resume. If you take longer, return here and tap Resume again.").apply { setPadding(0, ui.dp(8), 0, 0) })
                 }
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            })
         }
     }
 
-    private fun setup() = column().apply {
-        addView(ui.section("Set up protection"))
-        addView(ui.note("Detach uses Accessibility only in Instagram, YouTube and its protected Settings pages. It never reads banking or payment screens and has no internet access."))
-        addView(ui.space(14))
-        addView(ui.primary("Open Accessibility") { open(Intent(SysSettings.ACTION_ACCESSIBILITY_SETTINGS)) })
-        addView(ui.note("Open Detach under Downloaded apps, then turn on Use Detach.").apply { setPadding(0, ui.dp(10), 0, 0) })
-        if (Build.VERSION.SDK_INT >= 33) {
+    private fun setup() = ui.card().apply {
+        val enabled = serviceEnabled()
+        addView(cardHeading(R.drawable.ic_settings, "Accessibility", if (enabled) "Enabled in Android settings."
+            else "Open Detach under Downloaded apps, then turn on Use Detach."))
+        addView(ui.space(12))
+        addView(ui.secondary("Open Accessibility") { open(Intent(SysSettings.ACTION_ACCESSIBILITY_SETTINGS)) })
+        if (!enabled && Build.VERSION.SDK_INT >= 33) {
             addView(disclosure("restricted", "Android says Restricted setting?") {
                 addView(ui.note("For an app installed from a file: open App info, tap the top-right menu and choose Allow restricted settings. Then return to Accessibility."))
                 addView(ui.space(8))
@@ -289,67 +507,67 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun focus() = column().apply {
-        val active = FocusSession.active(this@MainActivity)
-        addView(ui.section("Focus mode"))
-        addView(ui.text(if (active) "Focus is active" else "Make your phone a focused space.", 19f, strong = true))
-        val selected = settings.focusAllowedPackages.mapNotNull { packageName ->
-            runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString() }.getOrNull()
-        }.distinctBy { it.lowercase() }.sorted()
-        addView(ui.note(if (active) "${FocusSession.remainingMs(this@MainActivity) / 60_000 + 1} min remaining. Home and all unselected apps return to the Focus screen."
-            else "Allowed: " + (selected.ifEmpty { listOf("Phone, Contacts, WhatsApp, Drive") }.joinToString(", "))).apply { setPadding(0, ui.dp(8), 0, ui.dp(12)) })
-        if (active) addView(ui.primary("Return to Focus") { FocusActivity.active = false; startActivity(Intent(this@MainActivity, FocusActivity::class.java)) })
-        else addView(ui.primary("Set Focus duration") { chooseFocusDuration() })
-        addView(ui.quiet("Choose allowed apps") { FocusAppPicker.show(this@MainActivity) { render() } })
-        addView(ui.hairline())
-    }
-
-    private fun chooseFocusDuration() {
-        val ui = Ui(this)
-        fun picker(max: Int, initial: Int) = NumberPicker(this).apply { minValue = 0; maxValue = max; value = initial; wrapSelectorWheel = true }
-        val hours = picker(23, 0)
-        val minutes = picker(59, 25)
-        val seconds = picker(59, 0)
-        val row = LinearLayout(this).apply {
-            gravity = Gravity.CENTER
-            setPadding(ui.dp(20), ui.dp(8), ui.dp(20), ui.dp(8))
-            addView(hours, LinearLayout.LayoutParams(0, ui.dp(160), 1f))
-            addView(minutes, LinearLayout.LayoutParams(0, ui.dp(160), 1f))
-            addView(seconds, LinearLayout.LayoutParams(0, ui.dp(160), 1f))
-        }
-        AlertDialog.Builder(this).setTitle("Focus duration")
-            .setMessage("Hours  ·  Minutes  ·  Seconds")
-            .setView(row)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Start", null)
-            .create().also { dialog ->
-                dialog.setOnShowListener {
-                    ui.style(dialog)
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        val total = hours.value * 3600L + minutes.value * 60L + seconds.value
-                        if (total == 0L) { Toast.makeText(this, "Choose at least one second.", Toast.LENGTH_SHORT).show() }
-                        else { dialog.dismiss(); startFocus(total) }
+    private fun focus(active: Boolean) = ui.hero(column().apply {
+            setPadding(ui.dp(18), ui.dp(17), ui.dp(18), ui.dp(18))
+            addView(ui.badge(R.drawable.ic_sessions, 40, ui.onAccent, ui.accent))
+            addView(ui.space(10))
+            addView(ui.display("Focus mode", 31f).apply { isAccessibilityHeading = true })
+            if (active) {
+                addView(ui.note("Session in progress"))
+                addView(ui.space(12))
+                addView(ui.primary("Return to Focus") {
+                    if (DetachService.isRunning) {
+                        DetachService.openFocusHome()
+                    } else {
+                        open(Intent(this@MainActivity, FocusActivity::class.java))
                     }
-                }
-                dialog.show()
+                })
+            } else {
+                addView(ui.note("Keep the apps you need and pause the rest.").apply {
+                    setPadding(0, ui.dp(4), 0, ui.dp(14))
+                })
+                addView(ui.primary("Set Focus duration") { chooseFocusDuration() })
+                addView(ui.space(8))
+                addView(focusAppsRow())
+                addView(ui.quiet("Add Focus widget") { addHomeWidget(FocusWidgetProvider::class.java, "Focus timer") })
             }
+    })
+
+    private fun focusAppsRow(): View {
+        val apps = FocusAppPicker.allowedApps(this)
+        val preview = apps.take(3).joinToString(", ") { it.name }
+        val summary = when {
+            apps.isEmpty() -> "No apps available"
+            apps.size <= 3 -> preview
+            else -> "$preview +${apps.size - 3} more"
+        }
+        return LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            background = ui.ripple(ui.fieldSurface, ui.line)
+            setPaddingRelative(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8))
+            minimumHeight = ui.dp(56)
+            isFocusable = true
+            contentDescription = "Choose allowed apps. ${apps.size} available during Focus."
+            addView(ui.badge(R.drawable.ic_apps, 32))
+            addView(column().apply {
+                setPaddingRelative(ui.dp(9), 0, ui.dp(6), 0)
+                addView(ui.text("Choose allowed apps", 14f, strong = true))
+                addView(ui.note(summary).apply {
+                    maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(ui.icon(R.drawable.ic_chevron, 20, ui.accent).apply { rotation = -90f })
+            setOnClickListener { FocusAppPicker.show(this@MainActivity) { render() } }
+        }
     }
 
-    private fun startFocus(seconds: Long) {
-        if (!serviceEnabled() || !DetachService.isRunning) {
-            Toast.makeText(this, "Turn on Accessibility protection before starting Focus.", Toast.LENGTH_LONG).show()
-            open(Intent(SysSettings.ACTION_ACCESSIBILITY_SETTINGS))
-            return
-        }
-        FocusSession.startSeconds(this, seconds)
-        DetachService.refreshSettings()
-        DetachService.openFocusHome()
-        moveTaskToBack(true)
+    private fun chooseFocusDuration() = FocusDurationPicker.show(this) { seconds ->
+        FocusEntry.startOrReturn(this, seconds)
         render()
     }
 
-    private fun instagram() = column().apply {
-        addView(ui.section("App controls"))
+    private fun instagram() = ui.card(14).apply {
         val options = column()
         addView(appRow(R.drawable.ic_instagram_glyph, "Instagram", settings.igEnabled,
             { if (it) "Your selected limits are on" else "No limits applied" }) {
@@ -367,21 +585,18 @@ class MainActivity : Activity() {
         options.addView(optionRow("Allow reels sent in DMs", "One shared reel; no swiping to the next", settings.igSharedReels) { settings.igSharedReels = it })
         setEnabledLook(options, settings.igEnabled, animate = false)
         addView(disclosure("instagram-options", "Customize Instagram") { addView(options) })
-        addView(ui.hairline())
     }
 
-    private fun youtube() = column().apply {
+    private fun youtube() = ui.card(14).apply {
         addView(appRow(R.drawable.ic_youtube_glyph, "YouTube", settings.ytShorts,
             { if (it) "Shorts blocked. Videos stay available." else "No limits applied" }) {
             settings.ytShorts = it
             DetachService.refreshSettings()
         })
-        addView(ui.hairline())
     }
 
-    private fun blockedApps() = column().apply {
-        addView(ui.section("Blocked apps"))
-        addView(ui.note("Selected apps are covered while Detach protection is on. Use Home or Back to leave."))
+    private fun blockedApps() = ui.card().apply {
+        addView(cardHeading(R.drawable.ic_lock, "Blocked apps", "Whole-app blocks apply while protection is on."))
         val names = settings.blockedPackages.mapNotNull { packageName ->
             runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString() }
                 .getOrNull()
@@ -392,25 +607,33 @@ class MainActivity : Activity() {
         addView(ui.secondary("Choose apps to block") {
             requirePassword { PaymentAppPicker.showBlockedApps(this@MainActivity) { DetachService.refreshSettings(); render() } }
         })
-        addView(ui.hairline())
     }
 
     private fun payments(paused: Boolean) = column().apply {
-        addView(ui.section("Payments"))
-        addView(ui.text("Switch off. Pay. Resume.", 19f, strong = true))
-        addView(ui.note("A payment pause fully disables Accessibility and removes overlays. The timer resumes protection with the optional USB grant; otherwise it reminds you to resume in Settings. App detection is a separate opt-in below.").apply { setPadding(0, ui.dp(8), 0, ui.dp(14)) })
-        if (!paused && DetachService.isRunning) addView(ui.secondary("Pause protection for payment") {
-            Auth.confirm(this@MainActivity, "Pause for payments") {
-                toast(if (DetachService.pauseForPayments()) "Protection paused. Your payment timer is set."
-                    else "Could not pause protection. Check Accessibility or try again.")
-                render()
+        if (paused) addView(ui.space(12))
+        addView(ui.hero(column().apply {
+            setPadding(ui.dp(17), ui.dp(16), ui.dp(17), ui.dp(17))
+            addView(cardHeading(R.drawable.ic_payments, "Payment pause",
+                "Temporarily switches off Detach’s Accessibility service so you can use payment apps."))
+            if (!paused && DetachService.isRunning) {
+                addView(ui.space(12))
+                addView(ui.primary("Pause protection for payment") {
+                    Auth.confirm(this@MainActivity, "Pause for payments") {
+                        toast(if (DetachService.pauseForPayments()) "Protection paused. Your payment timer is set."
+                            else "Could not pause protection. Check Accessibility or try again.")
+                        render()
+                    }
+                })
             }
+        }))
+        addView(ui.space(10))
+        addView(ui.card().apply {
+            addView(cardHeading(R.drawable.ic_apps, "Home screen widget", "Open a payment app from your home screen. Detach pauses protection first."))
+            addView(ui.space(10))
+            addView(ui.secondary("Add payment widget") { addHomeWidget(PaymentWidgetProvider::class.java, "Payment apps") })
         })
-        addView(ui.secondary("Add payment widget") { addPaymentWidget() })
-        addView(ui.note("Launch selected payment apps from your home screen. Detach pauses protection before opening them.").apply {
-            setPadding(0, ui.dp(8), 0, ui.dp(8))
-        })
-        addView(disclosure("payment-options", "Payment preferences") {
+        addView(ui.space(10))
+        val preferences = disclosure("payment-options", "Payment preferences") {
             addView(optionRow("Auto-pause for payment apps", "Checks selected package names, never screen content", settings.autoPausePayments) {
                 settings.autoPausePayments = it
             })
@@ -443,8 +666,8 @@ class MainActivity : Activity() {
                     setPadding(0, ui.dp(10), 0, ui.dp(10))
                 })
             })
-        })
-        addView(ui.hairline())
+        }
+        addView(ui.card(14).apply { addView(preferences) })
     }
 
     private fun reminderRow() = LinearLayout(this).apply {
@@ -516,10 +739,11 @@ class MainActivity : Activity() {
         dialog.setOnDismissListener { protectedDialogs.remove(dialog) }
     }
 
-    private fun protection() = column().apply {
-        addView(ui.section("Settings protection"))
+    private fun protection() = ui.card().apply {
+        addView(cardHeading(R.drawable.ic_lock, "Settings protection"))
+        addView(ui.space(10))
         addView(ui.text(when {
-            !lock.isSet -> "Add a little friction"
+            !lock.isSet -> "No password set"
             unlocked -> "Unlocked for this visit"
             else -> "Your settings are locked"
         }, 19f, strong = true))
@@ -537,11 +761,10 @@ class MainActivity : Activity() {
         addView(disclosure("lock-info", "How protection works") {
             addView(ui.note("Detach protects its system settings from being switched off, force-stopped, cleared or uninstalled. Once your daily breather allowance is exhausted, those pages stay locked until the allowance resets. Otherwise unlocking uses your password or fingerprint, or a 30-second wait if neither is available. Changing or removing a password always requires the current password."))
         })
-        addView(ui.hairline())
     }
 
     private fun privacy() = disclosure("privacy-info", "Private by design") {
-        addView(ui.note("No internet permission. Nothing is uploaded.\n\nScreen content is read only in Instagram, YouTube and protected Settings pages. Payment auto-pause checks selected package names, never their content. Optional Usage Access detection checks recent foreground packages only during pauses; app history is not saved.\n\nPreferences, a hashed password, pause and breather timing, today's breather history, and diagnostic counters stay in private on-device storage. Screen content is not saved."))
+        addView(ui.note("Detach has no internet permission.\n\nScreen content is read only in Instagram, YouTube and protected Settings pages. Payment monitoring checks package names. Screen time saves daily totals for selected apps on this phone. If you set up a backup, those totals and app names are copied to the folder you choose.\n\nPreferences, a hashed password, pause timing, recent Breather timing and diagnostic counters stay in private on-device storage. Screen content is not saved."))
         addView(ui.space(12))
     }
 
@@ -555,6 +778,16 @@ class MainActivity : Activity() {
     }
 
     private fun column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+    private fun cardHeading(icon: Int, title: String, detail: String? = null) = LinearLayout(this).apply {
+        gravity = if (detail == null) Gravity.CENTER_VERTICAL else Gravity.TOP
+        addView(ui.badge(icon))
+        addView(column().apply {
+            setPaddingRelative(ui.dp(12), ui.dp(1), 0, 0)
+            addView(ui.text(title, 18f, strong = true).apply { isAccessibilityHeading = true })
+            if (detail != null) addView(ui.note(detail))
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    }
 
     private fun disclosure(key: String, label: String, content: LinearLayout.() -> Unit): View {
         val box = column()
@@ -578,12 +811,12 @@ class MainActivity : Activity() {
     private fun appRow(icon: Int, title: String, value: Boolean, subtitle: (Boolean) -> String, change: (Boolean) -> Unit): View {
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, ui.dp(16), 0, ui.dp(12))
+            minimumHeight = ui.dp(54)
         }
-        row.addView(ui.icon(icon, 28))
-        val labels = column().apply { setPadding(ui.dp(14), 0, ui.dp(8), 0) }
+        row.addView(ui.badge(icon))
+        val labels = column().apply { setPaddingRelative(ui.dp(12), 0, ui.dp(6), 0) }
         labels.addView(ui.text(title, 18f, strong = true))
-        val detail = ui.note(subtitle(value)).apply { setPadding(0, ui.dp(5), 0, 0) }
+        val detail = ui.note(subtitle(value))
         labels.addView(detail)
         row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         row.addView(guardedSwitch(value, "$title protection") {
@@ -758,35 +991,13 @@ class MainActivity : Activity() {
     private fun needsNotificationPermission() = Build.VERSION.SDK_INT >= 33 &&
         checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
 
-    private fun showWidgetUpdateOnce() {
-        if (whatsNewDialog?.isShowing == true) return
-        val updates = getSharedPreferences(UPDATE_PREFS, MODE_PRIVATE)
-        if (updates.getBoolean(WIDGET_UPDATE_KEY, false)) return
-        // Record before showing so a rotation or process recreation cannot repeat the one-time notice.
-        updates.edit().putBoolean(WIDGET_UPDATE_KEY, true).apply()
-        whatsNewDialog = AlertDialog.Builder(this)
-            .setTitle("New: Payment widget")
-            .setMessage(
-                "Open selected UPI and banking apps directly from your home screen. " +
-                    "Detach pauses Accessibility before the payment app opens.\n\n" +
-                    "Resize it from 1×1 up to 2×4. The layout automatically adapts from one to ten apps."
-            )
-            .setNegativeButton("Not now", null)
-            .setPositiveButton("Add widget") { _, _ -> addPaymentWidget() }
-            .create().also { dialog ->
-                dialog.setOnShowListener { ui.style(dialog) }
-                dialog.setOnDismissListener { if (whatsNewDialog === dialog) whatsNewDialog = null }
-                dialog.show()
-            }
-    }
-
-    private fun addPaymentWidget() {
+    private fun addHomeWidget(providerClass: Class<out android.appwidget.AppWidgetProvider>, label: String) {
         val manager = AppWidgetManager.getInstance(this)
-        val provider = ComponentName(this, PaymentWidgetProvider::class.java)
+        val provider = ComponentName(this, providerClass)
         if (manager.isRequestPinAppWidgetSupported && manager.requestPinAppWidget(provider, null, null)) return
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Add the payment widget")
-            .setMessage("Touch and hold an empty area of your home screen, choose Widgets, find Detach, then drag Payment apps onto the home screen.")
+            .setTitle("Add $label to Home")
+            .setMessage("Touch and hold an empty area of your home screen, choose Widgets, find Detach, then drag $label onto the home screen.")
             .setPositiveButton("Got it", null)
             .create()
         dialog.setOnShowListener { ui.style(dialog) }
@@ -804,8 +1015,8 @@ class MainActivity : Activity() {
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
 
-    internal companion object {
-        const val UPDATE_PREFS = "update_notices"
-        const val WIDGET_UPDATE_KEY = "payment_widget_v1"
+    private companion object {
+        const val BACKUP_FOLDER = 81
+        const val BACKUP_RESTORE = 82
     }
 }

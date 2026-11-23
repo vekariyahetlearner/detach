@@ -117,12 +117,13 @@ object Breather {
             approved.minutes != minutes || approved.features != features || minutes !in 1..BreatherBudget.MAX_MINUTES || features.isEmpty()
         ) return@synchronized false
         if (!BreatherBudget.charge(context, minutes)) return@synchronized false
+        runCatching { BreatherUsageHistory.finish() }
         val saved = runCatching {
             val elapsed = SystemClock.elapsedRealtime()
             val wall = System.currentTimeMillis()
             val boot = SystemSettings.Global.getInt(context.contentResolver, SystemSettings.Global.BOOT_COUNT, -1)
             val duration = minutes * MINUTE_MS
-            if (elapsed < 0 || wall <= 0 || wall > Long.MAX_VALUE - duration || boot < 0) return@runCatching false
+            if (elapsed < 0 || wall <= 0 || wall > Long.MAX_VALUE - duration || boot < 0) return@runCatching null
             preferences(context).edit().clear()
                 .putInt("version", 1)
                 .putString("process", process)
@@ -131,14 +132,18 @@ object Breather {
                 .putLong("wall", wall)
                 .putLong("duration", duration)
                 .putStringSet("features", features.mapTo(mutableSetOf()) { it.name })
-                .commit()
-        }.getOrDefault(false)
-        if (!saved) {
+                .commit().takeIf { it }?.let { wall to elapsed }
+        }.getOrNull()
+        if (saved == null) {
             invalidate(context)
             return@synchronized false
         }
         storageFailed = false
-        session(context) != null
+        if (session(context) == null) return@synchronized false
+        if (Feature.YT_SHORTS in features) runCatching {
+            BreatherUsageHistory.start(context, saved.first, saved.second, minutes * MINUTE_MS)
+        }
+        true
     }
 
     fun allows(context: Context, feature: Feature): Boolean = synchronized(monitor) {
@@ -194,6 +199,7 @@ object Breather {
     }
 
     private fun invalidate(context: Context) {
+        runCatching { BreatherUsageHistory.finish() }
         storageFailed = true
         runCatching { preferences(context).edit().clear().commit() }
     }
