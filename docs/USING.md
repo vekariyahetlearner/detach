@@ -12,6 +12,14 @@ Everything happens on one screen in the Detach app.
 | **Protection is paused** | A [payment pause](#pause-for-payments) is pending. The timer can resume with the optional USB grant; without it, tap **Resume protection** and complete Android Settings. |
 | *Allow notifications…* | Optional protection status, payment reminders and compatibility warnings. |
 
+## Focus mode
+
+Choose **Allowed during Focus**, then start a session. The provided **Start 1-minute test Focus** button is useful for checking the full flow before a longer session. Phone, Contacts, WhatsApp and Drive are preselected when installed.
+
+During Focus, Detach opens an immersive Focus home with the current time, remaining time and only your allowed app tiles. Back does nothing on that home; Home, Recents, a launcher, a notification/deep link, or an unselected app returns to Focus. The timer ends the session automatically and then shows a completion screen. Emergency calling remains owned by Android.
+
+This is Accessibility-based enforcement, not Device Owner kiosk mode. Android can still be escaped by force-stopping/uninstalling Detach or safe mode; managed-device Lock Task is required for hardware-level lockdown.
+
 ## Instagram controls
 
 The **main switch** turns all Instagram blocking on or off. **Customize Instagram** shows the individual controls:

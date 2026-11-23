@@ -42,6 +42,30 @@ class Settings(context: Context) {
             .getOrDefault(Targets.PAYMENT_DEFAULTS).orEmpty().filterTo(mutableSetOf()) { validPaymentPackage(it) }
         set(value) { p.edit().putStringSet("payment_packages", value.filterTo(mutableSetOf()) { validPaymentPackage(it) }).apply() }
 
+    var blockedPackages: Set<String>
+        get() = runCatching { p.getStringSet("blocked_packages", emptySet()) }.getOrDefault(emptySet())
+            .orEmpty().filterTo(mutableSetOf()) { validBlockedPackage(it) }
+        set(value) { p.edit().putStringSet("blocked_packages", value.filterTo(mutableSetOf()) { validBlockedPackage(it) }).apply() }
+
+    /** Apps that remain reachable from the Focus home. These are deliberately useful defaults. */
+    var focusAllowedPackages: Set<String>
+        get() {
+            val stored = runCatching { p.getStringSet("focus_allowed_packages", FOCUS_DEFAULTS) }
+                .getOrDefault(FOCUS_DEFAULTS).orEmpty().filterTo(mutableSetOf()) { validFocusPackage(it) }
+            // A zero-app Focus home is a dead end. Keep a usable essential set until the user
+            // explicitly replaces it with one or more apps in the picker.
+            return (stored + FOCUS_REQUIRED).ifEmpty { FOCUS_DEFAULTS }
+        }
+        set(value) { p.edit().putStringSet("focus_allowed_packages", (value + FOCUS_REQUIRED).filterTo(mutableSetOf()) { validFocusPackage(it) }).apply() }
+
+    fun focusRequired(packageName: String) = packageName in FOCUS_REQUIRED
+
+    private fun validFocusPackage(value: String) = value.length <= 255 && value.matches(PACKAGE_NAME) &&
+        value != app.packageName && value !in Targets.SYSTEM_UI && value !in Targets.GUARDED
+
+    private fun validBlockedPackage(value: String) = value.length <= 255 && value.matches(PACKAGE_NAME) &&
+        value != app.packageName && value !in Targets.SYSTEM_UI
+
     fun eventPackages(): Set<String> = Targets.READABLE + Targets.SYSTEM_UI +
         if (autoPausePayments) paymentPackages else emptySet()
 
@@ -63,6 +87,16 @@ class Settings(context: Context) {
     }
 
     private companion object {
+        /** Common Android packages; unavailable entries simply do not appear in the Focus grid. */
+        val FOCUS_DEFAULTS = setOf(
+            "com.google.android.dialer", "com.android.dialer",
+            "com.google.android.contacts", "com.android.contacts",
+            "com.whatsapp", "com.google.android.apps.docs",
+        )
+        val FOCUS_REQUIRED = setOf(
+            "com.google.android.dialer", "com.android.dialer",
+            "com.google.android.contacts", "com.android.contacts", "com.whatsapp",
+        )
         val PACKAGE_NAME = Regex("[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+")
     }
 }

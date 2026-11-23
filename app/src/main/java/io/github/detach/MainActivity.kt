@@ -15,6 +15,7 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.NumberPicker
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
@@ -100,7 +101,7 @@ class MainActivity : Activity() {
     }
 
     private val connectionTick = Runnable { render() }
-    private val breatherTick = Runnable { render() }
+    private val breatherTick = Runnable { DetachService.refreshSettings(); render() }
 
     override fun onResume() {
         super.onResume()
@@ -164,14 +165,20 @@ class MainActivity : Activity() {
         }
         if (serviceEnabled() && !DetachService.isRunning) root.postDelayed(connectionTick, 1000)
         val breatherRemaining = Breather.remainingMs(this)
-        if (breatherRemaining > 0) root.postDelayed(breatherTick, breatherRemaining + 1L)
+        val budget = BreatherBudget.status(this)
+        val cooldownRemaining = budget?.cooldownRemainingMs ?: 0L
+        val resetRemaining = budget?.let { (it.periodEnd - System.currentTimeMillis()).coerceAtLeast(1L) } ?: 0L
+        val nextBreatherChange = listOf(breatherRemaining, cooldownRemaining, resetRemaining).filter { it > 0 }.minOrNull()
+        if (nextBreatherChange != null) root.postDelayed(breatherTick, nextBreatherChange + 1L)
         if (!paused && !serviceEnabled()) root.addView(setup().apply { tag = "setup" })
         else if (needsNotificationPermission()) root.addView(ui.quiet("Allow status & reminder notifications") {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
         })
 
+        root.addView(focus().apply { tag = "focus" })
         root.addView(instagram().apply { tag = "instagram" })
         root.addView(youtube().apply { tag = "youtube" })
+        root.addView(blockedApps().apply { tag = "blocked-apps" })
         root.addView(column().apply {
             tag = "breather"
             addView(BreatherControls.build(this@MainActivity) {
@@ -282,6 +289,65 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun focus() = column().apply {
+        val active = FocusSession.active(this@MainActivity)
+        addView(ui.section("Focus mode"))
+        addView(ui.text(if (active) "Focus is active" else "Make your phone a focused space.", 19f, strong = true))
+        val selected = settings.focusAllowedPackages.mapNotNull { packageName ->
+            runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString() }.getOrNull()
+        }.distinctBy { it.lowercase() }.sorted()
+        addView(ui.note(if (active) "${FocusSession.remainingMs(this@MainActivity) / 60_000 + 1} min remaining. Home and all unselected apps return to the Focus screen."
+            else "Allowed: " + (selected.ifEmpty { listOf("Phone, Contacts, WhatsApp, Drive") }.joinToString(", "))).apply { setPadding(0, ui.dp(8), 0, ui.dp(12)) })
+        if (active) addView(ui.primary("Return to Focus") { FocusActivity.active = false; startActivity(Intent(this@MainActivity, FocusActivity::class.java)) })
+        else addView(ui.primary("Set Focus duration") { chooseFocusDuration() })
+        addView(ui.quiet("Choose allowed apps") { FocusAppPicker.show(this@MainActivity) { render() } })
+        addView(ui.hairline())
+    }
+
+    private fun chooseFocusDuration() {
+        val ui = Ui(this)
+        fun picker(max: Int, initial: Int) = NumberPicker(this).apply { minValue = 0; maxValue = max; value = initial; wrapSelectorWheel = true }
+        val hours = picker(23, 0)
+        val minutes = picker(59, 25)
+        val seconds = picker(59, 0)
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER
+            setPadding(ui.dp(20), ui.dp(8), ui.dp(20), ui.dp(8))
+            addView(hours, LinearLayout.LayoutParams(0, ui.dp(160), 1f))
+            addView(minutes, LinearLayout.LayoutParams(0, ui.dp(160), 1f))
+            addView(seconds, LinearLayout.LayoutParams(0, ui.dp(160), 1f))
+        }
+        AlertDialog.Builder(this).setTitle("Focus duration")
+            .setMessage("Hours  ·  Minutes  ·  Seconds")
+            .setView(row)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Start", null)
+            .create().also { dialog ->
+                dialog.setOnShowListener {
+                    ui.style(dialog)
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val total = hours.value * 3600L + minutes.value * 60L + seconds.value
+                        if (total == 0L) { Toast.makeText(this, "Choose at least one second.", Toast.LENGTH_SHORT).show() }
+                        else { dialog.dismiss(); startFocus(total) }
+                    }
+                }
+                dialog.show()
+            }
+    }
+
+    private fun startFocus(seconds: Long) {
+        if (!serviceEnabled() || !DetachService.isRunning) {
+            Toast.makeText(this, "Turn on Accessibility protection before starting Focus.", Toast.LENGTH_LONG).show()
+            open(Intent(SysSettings.ACTION_ACCESSIBILITY_SETTINGS))
+            return
+        }
+        FocusSession.startSeconds(this, seconds)
+        DetachService.refreshSettings()
+        DetachService.openFocusHome()
+        moveTaskToBack(true)
+        render()
+    }
+
     private fun instagram() = column().apply {
         addView(ui.section("App controls"))
         val options = column()
@@ -313,6 +379,22 @@ class MainActivity : Activity() {
         addView(ui.hairline())
     }
 
+    private fun blockedApps() = column().apply {
+        addView(ui.section("Blocked apps"))
+        addView(ui.note("Selected apps are covered while Detach protection is on. Use Home or Back to leave."))
+        val names = settings.blockedPackages.mapNotNull { packageName ->
+            runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString() }
+                .getOrNull()
+        }.sortedBy { it.lowercase() }
+        addView(ui.note(if (names.isEmpty()) "No apps selected" else names.joinToString(", ")).apply {
+            setPadding(0, ui.dp(8), 0, ui.dp(8))
+        })
+        addView(ui.secondary("Choose apps to block") {
+            requirePassword { PaymentAppPicker.showBlockedApps(this@MainActivity) { DetachService.refreshSettings(); render() } }
+        })
+        addView(ui.hairline())
+    }
+
     private fun payments(paused: Boolean) = column().apply {
         addView(ui.section("Payments"))
         addView(ui.text("Switch off. Pay. Resume.", 19f, strong = true))
@@ -338,7 +420,7 @@ class MainActivity : Activity() {
             addView(ui.secondary("Choose payment & banking apps") { requirePassword { choosePaymentApps() } })
             addView(ui.note("${settings.paymentPackages.size} apps selected. Four UPI apps are included by default; select any other banks you use.").apply { setPadding(0, ui.dp(8), 0, ui.dp(8)) })
             addView(reminderRow())
-            addView(optionRow("Resume when Instagram or YouTube opens", "Optional local app detection during payment pauses", settings.resumeOnSocialForeground) { enabled ->
+            addView(optionRow("Resume when Instagram or YouTube opens", "Also resumes for blocked apps during payment pauses", settings.resumeOnSocialForeground) { enabled ->
                 if (enabled) confirmForegroundResume() else {
                     settings.resumeOnSocialForeground = false
                     PauseForegroundMonitor.stop(this@MainActivity)
@@ -372,8 +454,12 @@ class MainActivity : Activity() {
         fun adjust(label: String, delta: Int) = ui.secondary(label) {
             val next = (settings.pauseMinutes + delta).coerceIn(1, 60)
             if (next != settings.pauseMinutes) requirePassword {
-                settings.pauseMinutes = next
-                render()
+                if (next > settings.pauseMinutes && BreatherBudget.restrictionsLocked(this@MainActivity)) {
+                    toast("Payment pause cannot be extended until the daily allowance resets.")
+                } else {
+                    settings.pauseMinutes = next
+                    render()
+                }
             }
         }.apply {
             contentDescription = if (delta < 0) "Decrease payment pause by one minute" else "Increase payment pause by one minute"
@@ -449,13 +535,13 @@ class MainActivity : Activity() {
             addView(ui.quiet("Remove") { removePassword() })
         })
         addView(disclosure("lock-info", "How protection works") {
-            addView(ui.note("The same password protects Detach’s system settings from being switched off, force-stopped, cleared or uninstalled. Without a password, that screen asks for your fingerprint, or a 30-second wait if none is available. Changing or removing a password always requires the current password."))
+            addView(ui.note("Detach protects its system settings from being switched off, force-stopped, cleared or uninstalled. Once your daily breather allowance is exhausted, those pages stay locked until the allowance resets. Otherwise unlocking uses your password or fingerprint, or a 30-second wait if neither is available. Changing or removing a password always requires the current password."))
         })
         addView(ui.hairline())
     }
 
     private fun privacy() = disclosure("privacy-info", "Private by design") {
-        addView(ui.note("No internet permission. Nothing is uploaded.\n\nScreen content is read only in Instagram, YouTube and protected Settings pages. Payment auto-pause checks selected package names, never their content. Optional Usage Access detection checks recent foreground packages only during pauses; app history is not saved.\n\nPreferences, a hashed password, pause and breather timing, and diagnostic counters stay in private on-device storage. Screen content is not saved."))
+        addView(ui.note("No internet permission. Nothing is uploaded.\n\nScreen content is read only in Instagram, YouTube and protected Settings pages. Payment auto-pause checks selected package names, never their content. Optional Usage Access detection checks recent foreground packages only during pauses; app history is not saved.\n\nPreferences, a hashed password, pause and breather timing, today's breather history, and diagnostic counters stay in private on-device storage. Screen content is not saved."))
         addView(ui.space(12))
     }
 
@@ -525,13 +611,43 @@ class MainActivity : Activity() {
     private fun guardedSwitch(value: Boolean, label: String, change: (Boolean) -> Unit): Switch = ui.toggle(value, label).apply {
         setOnCheckedChangeListener { control, wanted ->
             if (silent) return@setOnCheckedChangeListener
+            val relaxes = when (label) {
+                "Instagram protection", "YouTube protection", "Hide home feed", "Block Reels tab",
+                "Hide Explore & reels in search", "Hide others’ profile posts" -> !wanted
+                "Allow Stories", "Allow DMs", "Allow reels sent in DMs" -> wanted
+                "Resume when Instagram or YouTube opens" -> !wanted
+                "Auto-pause for payment apps" -> wanted
+                else -> false
+            }
+            // A short breather can leave allowance unused. Do not let it be used to turn off
+            // the permanent feed/Reels/Explore protection before it expires. DM permissions
+            // remain independently configurable because messaging is an intended use.
+            val coreScrollProtection = label in setOf(
+                "Instagram protection", "Hide home feed", "Block Reels tab",
+                "Hide Explore & reels in search", "Hide others’ profile posts"
+            )
+            val lockedForActiveBreather = coreScrollProtection && Breather.remainingMs(this@MainActivity) > 0L
+            val blocked = relaxes && (BreatherBudget.restrictionsLocked(this@MainActivity) || lockedForActiveBreather)
+            if (blocked) {
+                flip(control as Switch, !wanted)
+                toast(if (lockedForActiveBreather) "Core scrolling blocks stay on until the breather ends."
+                    else "Restrictions are locked until the daily allowance resets.")
+                return@setOnCheckedChangeListener
+            }
             if (!lock.isSet || unlocked) {
                 change(wanted)
             } else {
                 flip(control as Switch, !wanted)
                 requirePassword {
-                    flip(control, wanted)
-                    change(wanted)
+                    val stillLockedForBreather = coreScrollProtection && Breather.remainingMs(this@MainActivity) > 0L
+                    val stillBlocked = relaxes && (BreatherBudget.restrictionsLocked(this@MainActivity) || stillLockedForBreather)
+                    if (stillBlocked) {
+                        toast(if (stillLockedForBreather) "Core scrolling blocks stay on until the breather ends."
+                            else "Restrictions are locked until the daily allowance resets.")
+                    } else {
+                        flip(control, wanted)
+                        change(wanted)
+                    }
                 }
             }
         }

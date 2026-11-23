@@ -48,6 +48,8 @@ class PaymentAppPickerTest {
 
     @Before fun reset() {
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences("breather_budget", Context.MODE_PRIVATE).edit().clear().commit()
+        android.provider.Settings.Global.putInt(context.contentResolver, android.provider.Settings.Global.BOOT_COUNT, 9)
         shadowOf(manager).setResolveInfosForIntent(launcher, emptyList())
     }
 
@@ -85,6 +87,26 @@ class PaymentAppPickerTest {
         assertEquals(emptyList<String>(), PaymentAppPicker.loadApps(manager, context.packageName, emptySet()).map { it.name })
     }
 
+    @Test fun `block picker keeps launchable apps even with missing icons and package labels`() {
+        install("example.noicon", "No Icon", icon = 0)
+        install("example.package", "example.package")
+        install(Targets.INSTAGRAM, "Instagram")
+        val names = PaymentAppPicker.loadApps(manager, context.packageName, emptySet(), blocking = true).map { it.name }
+        assertTrue(names.containsAll(listOf("No Icon", "example.package", "Instagram")))
+    }
+
+    @Test fun `uninstalled blocked app is hidden but remains selected after reinstall`() {
+        val packageName = "example.reinstall"
+        Settings(context).blockedPackages = setOf(packageName)
+        val absent = PaymentAppPicker.loadApps(manager, context.packageName, Settings(context).blockedPackages, blocking = true)
+        assertTrue(absent.isEmpty())
+        assertEquals(setOf(packageName), Settings(context).blockedPackages)
+        install(packageName, "Reinstalled app")
+        val restored = PaymentAppPicker.loadApps(manager, context.packageName, Settings(context).blockedPackages, blocking = true)
+        assertEquals("Reinstalled app", restored.single().name)
+        assertEquals(setOf(packageName), Settings(context).blockedPackages)
+    }
+
     @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
     fun `icon raster preserves authentic local colors and aspect ratio`() {
         val app = install("bank.colors", "Color Bank")
@@ -117,6 +139,24 @@ class PaymentAppPickerTest {
         assertEquals(saved + "bank.actual", Settings(context).paymentPackages)
         assertEquals(1, savedCalls)
         assertFalse(dialog.isShowing)
+    }
+
+    @Test fun `exhausted allowance prevents removing blocked apps and adding payment apps`() {
+        install("bank.actual", "Actual Bank")
+        Settings(context).blockedPackages = setOf("bank.actual")
+        Settings(context).paymentPackages = emptySet()
+        assertTrue(BreatherBudget.charge(context, 30))
+        val activity = activity()
+        PaymentAppPicker.showBlockedApps(activity) {}
+        var dialog = loadedDialog()
+        click(list(dialog), 0)
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+        assertEquals(setOf("bank.actual"), Settings(context).blockedPackages)
+        PaymentAppPicker.show(activity) {}
+        dialog = loadedDialog()
+        click(list(dialog), 0)
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+        assertTrue(Settings(context).paymentPackages.isEmpty())
     }
 
     @Test fun `cancel leaves all original selections untouched and does not call onSaved`() {

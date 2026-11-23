@@ -203,8 +203,11 @@ object Pause {
     internal fun onObservedForeground(context: Context, token: String, packageName: String?, paymentForeground: Boolean) {
         if (token != automaticToken(context) || paymentForeground ||
             !Settings(context).resumeOnSocialForeground || !PauseForegroundMonitor.hasUsageAccess(context)) return
-        val social = packageName in Targets.PACKAGES
-        if (social || timerDue(context)) resumeAutomatically(context, token, social)
+        val settings = Settings(context)
+        val protected = packageName != null && (packageName in Targets.PACKAGES || packageName in settings.blockedPackages)
+        val activePayment = packageName != null && packageName in settings.paymentPackages
+        if (protected && !activePayment) resumeAutomatically(context, token, true)
+        else if (!paymentForeground && timerDue(context)) resumeAutomatically(context, token, false)
     }
 
     private fun resumeAutomatically(context: Context, token: String, social: Boolean): Boolean {

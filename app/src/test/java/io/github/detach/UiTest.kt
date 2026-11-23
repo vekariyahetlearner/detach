@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.hardware.biometrics.BiometricManager
 import android.os.CountDownTimer
+import android.os.Looper
 import android.provider.Settings as SystemSettings
 import android.view.View
 import android.view.ViewGroup
@@ -34,6 +35,7 @@ import org.robolectric.shadows.ShadowAlertDialog
 import org.robolectric.shadows.ShadowBiometricManager
 import org.robolectric.shadow.api.Shadow
 import org.robolectric.util.ReflectionHelpers
+import java.time.Duration
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -42,7 +44,8 @@ class UiTest {
     private val context get() = RuntimeEnvironment.getApplication()
 
     @Before fun reset() {
-        for (name in listOf("settings", "lock", "pause")) context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
+        for (name in listOf("settings", "lock", "pause", "breather", "breather_budget")) context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
+        SystemSettings.Global.putInt(context.contentResolver, SystemSettings.Global.BOOT_COUNT, 9)
         context.getSharedPreferences(MainActivity.UPDATE_PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(MainActivity.WIDGET_UPDATE_KEY, true).commit()
         SystemSettings.Global.putFloat(context.contentResolver, SystemSettings.Global.ANIMATOR_DURATION_SCALE, 0f)
@@ -63,6 +66,43 @@ class UiTest {
         assertTrue(settings.igSharedReels)
         toggle(activity, "Allow reels sent in DMs").performClick()
         assertFalse(settings.igSharedReels)
+    }
+
+    @Test fun `exhausted budget prevents weakening Instagram and YouTube controls`() {
+        assertTrue(BreatherBudget.charge(context, 30))
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        toggle(activity, "Instagram protection").performClick()
+        toggle(activity, "YouTube protection").performClick()
+        assertTrue(Settings(activity).igEnabled)
+        assertTrue(Settings(activity).ytShorts)
+        disclosure(activity, "instagram-options").performClick()
+        toggle(activity, "Hide home feed").performClick()
+        assertTrue(Settings(activity).igFeed)
+    }
+
+    @Test fun `active breather cannot permanently relax core scrolling controls`() {
+        Lock(context).set(BreatherTestSupport.PASSWORD)
+        assertEquals(true, BreatherTestSupport.start(
+            BreatherTestSupport.activity(), 10, Breather.Feature.entries.toSet()
+        ))
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        disclosure(activity, "instagram-options").performClick()
+        toggle(activity, "Hide home feed").performClick()
+        assertTrue(Settings(activity).igFeed)
+    }
+
+    @Test fun `open screen refreshes when daily budget reaches midnight`() {
+        assertTrue(BreatherBudget.charge(context, 30))
+        val prefs = context.getSharedPreferences("breather_budget", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        prefs.edit().putLong("end", now + 3_000).commit()
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        assertTrue(views(activity).filterIsInstance<TextView>().any { it.text == "Remaining today: 0 min" })
+        val beforeReset = System.currentTimeMillis()
+        prefs.edit().putLong("end", beforeReset - 1).putLong("started_wall", beforeReset - 2)
+            .putInt("boot", 8).commit()
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(4))
+        assertTrue(views(activity).filterIsInstance<TextView>().any { it.text == "Remaining today: 30 min" })
     }
 
     @Test fun `master protection disables its child controls without changing stored allowances`() {

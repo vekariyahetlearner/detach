@@ -67,7 +67,7 @@ object Breather {
         onResult: (Boolean) -> Unit,
     ) {
         val selected = features.toSet()
-        if (minutes !in 1..60 || selected.isEmpty() || activity.isFinishing || activity.isDestroyed ||
+        if (minutes !in 1..BreatherBudget.MAX_MINUTES || selected.isEmpty() || activity.isFinishing || activity.isDestroyed ||
             !runCatching { Auth.available(activity) }.getOrDefault(false)
         ) {
             onResult(false)
@@ -114,8 +114,9 @@ object Breather {
         val approved = authorization.get()
         authorization.remove()
         if (approved == null || approved.context !== context.applicationContext ||
-            approved.minutes != minutes || approved.features != features || minutes !in 1..60 || features.isEmpty()
+            approved.minutes != minutes || approved.features != features || minutes !in 1..BreatherBudget.MAX_MINUTES || features.isEmpty()
         ) return@synchronized false
+        if (!BreatherBudget.charge(context, minutes)) return@synchronized false
         val saved = runCatching {
             val elapsed = SystemClock.elapsedRealtime()
             val wall = System.currentTimeMillis()
@@ -184,7 +185,9 @@ object Breather {
             if (elapsedDelta >= duration || wallDelta >= duration ||
                 wallDelta - elapsedDelta !in -CLOCK_TOLERANCE_MS..CLOCK_TOLERANCE_MS
             ) return@runCatching null
-            Session(minOf(duration - elapsedDelta, duration - wallDelta), selected)
+            val remaining = minOf(duration - elapsedDelta, duration - wallDelta)
+            if (remaining <= 0) return@runCatching null
+            Session(remaining, selected)
         }.getOrNull()
         if (current == null) invalidate(context)
         return current

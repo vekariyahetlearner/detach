@@ -25,7 +25,7 @@ import android.provider.Settings as SystemSettings
  */
 object BreatherControls {
     const val MIN_MINUTES = 1
-    const val MAX_MINUTES = 60
+    const val MAX_MINUTES = BreatherBudget.MAX_MINUTES
     const val DEFAULT_MINUTES = 10
 
     fun build(activity: Activity, onChanged: () -> Unit): View {
@@ -37,15 +37,27 @@ object BreatherControls {
         fun render() {
             column.removeAllViews()
             val remaining = Breather.remainingMs(activity)
+            val budget = BreatherBudget.status(activity)
             column.addView(ui.section("BREATHER"))
-            column.addView(ui.note(if (remaining > 0) {
-                val minutes = (remaining + 59_999L) / 60_000L
-                "Breather on · $minutes min left. Instagram and YouTube are unblocked until it ends, then protection returns on its own."
-            } else {
-                "Need a few minutes? A breather unblocks Instagram and YouTube for up to an hour, then protection returns on its own. It always asks for your fingerprint or password."
-            }).apply { accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE })
-            column.addView(ui.space(12))
-            column.addView(ui.secondary(if (remaining > 0) "Extend breather" else "Start a breather") {
+            column.addView(ui.text(if (budget == null) "Allowance unavailable" else "Remaining today: ${budget.available} min", 20f, strong = true).apply {
+                accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            })
+            column.addView(ui.note(if (budget == null) "Breathers and restriction changes are temporarily locked while the daily allowance cannot be verified. After a reboot, leave the phone on to allow the safety check to finish."
+                else "Daily allowance: ${budget.dailyLimit} min").apply {
+                setPadding(0, ui.dp(2), 0, 0)
+            })
+            if (budget != null && remaining > 0) column.addView(ui.note("Breather active · ${(remaining + 59_999L) / 60_000L} min left"))
+            else if (budget != null && budget.cooldownRemainingMs > 0) column.addView(ui.note("Cooldown: ${(budget.cooldownRemainingMs + 59_999L) / 60_000L} min left"))
+            column.addView(ui.space(14))
+            val actions = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                tag = "breather-actions"
+            }
+            actions.addView(ui.secondary("Daily allowance") { chooseDailyAllowance(activity) { render(); onChanged() } }.apply {
+                isEnabled = budget != null && budget.dailyChanged.not()
+                contentDescription = "Set tomorrow's daily breather allowance"
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = ui.dp(4) })
+            actions.addView(ui.primary(if (remaining > 0) "Extend breather" else "Start a breather") {
                 if (!Auth.available(activity)) {
                     authenticationRequired(activity)
                 } else {
@@ -54,7 +66,33 @@ object BreatherControls {
                         onChanged()
                     }
                 }
-            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            }.apply { isEnabled = budget != null && budget.available > 0 && budget.cooldownRemainingMs == 0L }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = ui.dp(4) })
+            column.addView(actions)
+            val secondaryActions = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                tag = "breather-secondary-actions"
+            }
+            secondaryActions.addView(ui.secondary(if (budget?.cooldownEnabled == true) "Cooldown: on" else "Cooldown: off") {
+                val current = budget ?: return@secondary
+                if (BreatherBudget.setCooldown(activity, !current.cooldownEnabled)) { render(); onChanged() }
+                else Toast.makeText(activity, "Cooldown can be changed before today's first breather.", Toast.LENGTH_LONG).show()
+            }.apply {
+                isEnabled = budget != null && budget.used == 0 && budget.cooldownRemainingMs == 0L
+                contentDescription = "15 minute cooldown ${if (budget?.cooldownEnabled == true) "on" else "off"}"
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = ui.dp(4) })
+            secondaryActions.addView(ui.secondary("History") { showHistory(activity) }.apply {
+                contentDescription = "Today's breather history"
+                isEnabled = budget != null
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = ui.dp(4) })
+            column.addView(secondaryActions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = ui.dp(8)
+            })
+            if (budget != null) column.addView(ui.note(when {
+                budget.nextLimit != budget.dailyLimit -> "Tomorrow's allowance: ${budget.nextLimit} min"
+                budget.available == 0 -> "Today used up · Resets at midnight"
+                budget.dailyChanged -> "Daily allowance set for tomorrow"
+                else -> "Change once per day · changes start tomorrow"
+            }).apply { setPadding(0, ui.dp(8), 0, 0) })
             if (remaining > 0) {
                 column.addView(ui.space(8))
                 column.addView(ui.quiet("End breather now") {
@@ -98,11 +136,11 @@ object BreatherControls {
     }
 
     /** The native wheel used to pick a breather length; exposed for tests. */
-    internal fun minutePicker(activity: Activity, ui: Ui, initial: Int) = NumberPicker(activity).apply {
+    internal fun minutePicker(activity: Activity, ui: Ui, initial: Int, maximum: Int = MAX_MINUTES, minimum: Int = MIN_MINUTES) = NumberPicker(activity).apply {
         tag = "breather-minutes"
-        minValue = MIN_MINUTES
-        maxValue = MAX_MINUTES
-        value = initial.coerceIn(MIN_MINUTES, MAX_MINUTES)
+        minValue = minimum.coerceIn(0, MAX_MINUTES)
+        maxValue = maximum.coerceIn(minValue, MAX_MINUTES)
+        value = initial.coerceIn(minValue, maxValue)
         wrapSelectorWheel = false
         // Wheel-only: avoids an unexpected keyboard and keeps values always in range.
         descendantFocusability = NumberPicker.FOCUS_BLOCK_DESCENDANTS
@@ -119,6 +157,8 @@ object BreatherControls {
 
     private fun choose(activity: Activity, onChanged: () -> Unit) {
         val ui = Ui(activity)
+        val available = BreatherBudget.status(activity)?.available ?: 0
+        if (available < 1) return
         val remaining = Breather.remainingMs(activity)
         val initial = if (remaining > 0) ((remaining + 59_999L) / 60_000L).toInt() else DEFAULT_MINUTES
         val content = LinearLayout(activity).apply {
@@ -126,11 +166,11 @@ object BreatherControls {
             setPadding(ui.dp(24), ui.dp(4), ui.dp(24), ui.dp(8))
         }
         content.addView(ui.note(if (remaining > 0) {
-            "Pick a new length. It replaces the time left; it doesn’t add to it."
+            "Pick a new length. It replaces the time left and the full new duration counts toward today's allowance."
         } else {
-            "Instagram and YouTube will be fully unblocked, then protection returns on its own."
+            "Instagram and YouTube feature limits pause temporarily; whole-app blocks stay on. The full chosen time counts even if you end early. If enabled, cooldown starts after the scheduled end."
         }))
-        val picker = minutePicker(activity, ui, initial)
+        val picker = minutePicker(activity, ui, initial, available)
         val unit = ui.text("min", 18f, ui.sub, strong = true).apply {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
@@ -177,6 +217,51 @@ object BreatherControls {
                 }
             }
         }
+        dialog.show()
+    }
+
+    private fun chooseDailyAllowance(activity: Activity, onChanged: () -> Unit) {
+        val status = BreatherBudget.status(activity) ?: return
+        if (status.dailyChanged) return
+        val ui = Ui(activity)
+        val picker = minutePicker(activity, ui, status.dailyLimit, MAX_MINUTES, minimum = 0).apply {
+            contentDescription = "Tomorrow's daily breather allowance in minutes"
+        }
+        val content = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(ui.dp(24), ui.dp(8), ui.dp(24), 0)
+            addView(ui.note("Choose tomorrow's daily allowance from 0 to 60 minutes. Today's allowance will not change."))
+            addView(picker, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.CENTER })
+        }
+        val preview = ui.text("Today: ${status.dailyLimit} min · Tomorrow: ${picker.value} min", 14f, strong = true).apply {
+            gravity = Gravity.CENTER
+            tag = "breather-limit-preview"
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            setPadding(0, ui.dp(4), 0, ui.dp(4))
+        }
+        content.addView(preview)
+        content.addView(ui.note("You can change this once today. The new allowance begins at local midnight.").apply {
+            setPadding(0, ui.dp(8), 0, 0)
+        })
+        picker.setOnValueChangedListener { _, _, value -> preview.text = "Today: ${status.dailyLimit} min · Tomorrow: $value min" }
+        val dialog = AlertDialog.Builder(activity).setTitle("Daily allowance").setView(ScrollView(activity).apply { addView(content) })
+            .setNegativeButton("Cancel", null).setPositiveButton("Save") { _, _ ->
+                if (BreatherBudget.setDailyLimit(activity, picker.value)) onChanged()
+                else Toast.makeText(activity, "Could not save daily limit.", Toast.LENGTH_LONG).show()
+            }.create()
+        dialog.setOnShowListener { ui.style(dialog) }
+        dialog.show()
+    }
+
+    private fun showHistory(activity: Activity) {
+        val entries = BreatherBudget.history(activity)
+        val format = DateFormat.getTimeFormat(activity)
+        val message = if (entries.isEmpty()) "No breathers recorded today." else entries.joinToString("\n") {
+            "${format.format(Date(it.startedAt))} · ${it.minutes} min charged"
+        }
+        val dialog = AlertDialog.Builder(activity).setTitle("Today's breathers").setMessage(message)
+            .setPositiveButton("Done", null).create()
+        dialog.setOnShowListener { Ui(activity).style(dialog) }
         dialog.show()
     }
 }

@@ -67,4 +67,10 @@
         <item name="android:windowActionBar">false</item>
         <item name="android:windowDisablePreview">true</item>
     </style>
+    <style name="Theme.Detach.Focus" parent="Theme.Detach">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowDisablePreview">true</item>
+        <!-- Status bar stays visible for notification indicators; navigation is hidden in code. -->
+    </style>
 </resources>

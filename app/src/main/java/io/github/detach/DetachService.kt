@@ -33,12 +33,15 @@ class DetachService : AccessibilityService() {
     private lateinit var yt: YouTubeRules
     private lateinit var cover: FeedCover
     private lateinit var guard: GuardOverlay
+    private lateinit var focusHome: FocusOverlay
     private lateinit var lock: Lock
     private val coverState = CoverState()
     private val coverRevision = AtomicLong()
     private val guardRevision = AtomicLong()
     @Volatile private var coverPackage: String? = null
     @Volatile private var guardPackage: String? = null
+    @Volatile private var lastFocusRedirect = 0L
+    @Volatile private var focusMayRestore = false
 
     private val main = Handler(Looper.getMainLooper())
     private lateinit var thread: HandlerThread
@@ -80,6 +83,22 @@ class DetachService : AccessibilityService() {
         }
     }
 
+    private val focusReturnCheck = Runnable {
+        if (!pausing && FocusSession.active(this)) {
+            val pkg = foreground()
+            if (pkg != null && pkg !in Targets.SYSTEM_UI && !focusAllows(pkg) && !FocusLaunchGate.awaiting()) showFocusHome()
+        }
+    }
+
+    private val focusRestoreWatchdog = object : Runnable {
+        override fun run() {
+            if (pausing || !FocusSession.active(this@DetachService)) return
+            val pkg = foreground()
+            if (focusMayRestore && pkg != null && pkg !in Targets.SYSTEM_UI && !focusAllows(pkg) && !FocusLaunchGate.awaiting()) showFocusHome()
+            main.postDelayed(this, 180)
+        }
+    }
+
     private val inspectReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (!BuildConfig.DEBUG || pausing || !::worker.isInitialized) return
@@ -105,7 +124,7 @@ class DetachService : AccessibilityService() {
         }
         settings = Settings(this)
         val startupPackage = foreground()
-        if (Pause.shouldAutoPausePayment(this, startupPackage) && Pause.begin(this, startupPackage)) {
+        if (startupPackage !in settings.blockedPackages && Pause.shouldAutoPausePayment(this, startupPackage) && Pause.begin(this, startupPackage)) {
             stopProtection()
             disableSelf()
             return
@@ -116,6 +135,8 @@ class DetachService : AccessibilityService() {
         cover = FeedCover(this, onBackToStories = { backToStories() }, onBackToSearch = { backToSearch() })
         lock = Lock(this)
         guard = GuardOverlay(this, onUnlock = { openUnlock() }, onGoBack = { leaveProtectedPage() })
+        focusHome = FocusOverlay(this)
+        if (FocusSession.active(this)) { focusMayRestore = true; main.post(focusRestoreWatchdog) }
         thread = HandlerThread("detach").also { it.start() }
         worker = Handler(thread.looper)
         updateEventFilter()
@@ -162,6 +183,11 @@ class DetachService : AccessibilityService() {
         if (pausing || !::worker.isInitialized) return
         main.removeCallbacks(breatherExpiry)
         val remaining = Breather.remainingMs(this)
+        // A budget reset can release the strict Settings guard even if no accessibility event
+        // arrives at midnight, so schedule that transition independently of a breather expiry.
+        val untilReset = BreatherBudget.status(this)?.let {
+            (it.periodEnd - System.currentTimeMillis()).coerceAtLeast(1L)
+        } ?: 0L
         worker.post {
             if (!pausing) {
                 ig.reset()
@@ -171,7 +197,9 @@ class DetachService : AccessibilityService() {
                 requestEval(immediate = true)
             }
         }
-        if (remaining > 0L) main.postDelayed(breatherExpiry, remaining + 1L)
+        listOf(remaining, untilReset).filter { it > 0L }.minOrNull()?.let {
+            main.postDelayed(breatherExpiry, it + 1L)
+        }
         Pause.refreshNotification(this)
     }
 
@@ -187,6 +215,7 @@ class DetachService : AccessibilityService() {
         if (::worker.isInitialized) worker.removeCallbacksAndMessages(null)
         if (::cover.isInitialized) cover.hide()
         if (::guard.isInitialized) guard.hide()
+        if (::focusHome.isInitialized) focusHome.hide()
         coverState.clear()
         pending = null
         pendingPackage = null
@@ -196,7 +225,10 @@ class DetachService : AccessibilityService() {
 
     private fun updateEventFilter() {
         serviceInfo?.let { info ->
-            info.packageNames = settings.eventPackages().toTypedArray()
+            // Focus is an allowlist: it must see every foreground package in order to send an
+            // indirect launch (notification, deep link, Recents, launcher) back to Focus.
+            info.packageNames = if (FocusSession.active(this)) null
+                else (settings.eventPackages() + settings.blockedPackages).toTypedArray()
             info.notificationTimeout = 16
             serviceInfo = info
         }
@@ -205,7 +237,49 @@ class DetachService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         val pkg = event.packageName?.toString() ?: return
         if (pausing || !::worker.isInitialized) return
+        if (FocusSession.active(this)) {
+            // Any event from an allowed app wins immediately. This deliberately gives selected
+            // apps priority over the Focus surface, including long-running/quiet screens.
+            if (pkg in settings.focusAllowedPackages) {
+                // An allowed app is authoritative: cancel a stale post-shade check before it
+                // can put the lock back above WhatsApp/Contacts/another selected app.
+                main.removeCallbacks(focusReturnCheck)
+                focusMayRestore = false
+                hideFocusHome()
+                return
+            }
+            // Focus used to inspect every content-change event from every installed app. That
+            // made typing and scrolling lag. A foreground/window transition is sufficient to
+            // enforce the allowlist, so all in-app events are ignored here.
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                when {
+                    // The selected app won the handoff. No other package receives this grace.
+                    FocusLaunchGate.accepts(pkg) -> { FocusLaunchGate.clear(); focusMayRestore = false; main.removeCallbacks(focusReturnCheck); hideFocusHome() }
+                    // Detach pauses while an allowed tile is launching and Android may surface
+                    // SystemUI for a frame. Neither is an escape route during this tiny window.
+                    FocusLaunchGate.awaiting() && (pkg == packageName || pkg in Targets.SYSTEM_UI) -> Unit
+                    // Let the notification shade sit above everything. Once it closes, check
+                    // the actual foreground package after the SystemUI transition settles.
+                    (pkg in Targets.SYSTEM_UI || pkg == currentImePackage()) -> {
+                        // Keyboard/IME events are SystemUI too. If an allowed app is active it
+                        // has already set focusMayRestore=false, so do not arm a restore over it.
+                        if (focusMayRestore) {
+                            hideFocusHome()
+                            main.removeCallbacks(focusReturnCheck)
+                            main.postDelayed(focusReturnCheck, 260)
+                        }
+                    }
+                    !focusAllows(pkg) -> { focusMayRestore = true; showFocusHome() }
+                }
+            }
+            return
+        }
         val activePackage = foreground()
+        if (activePackage in settings.blockedPackages || coverOn && coverPackage in settings.blockedPackages) {
+            val changed = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || activePackage != coverPackage
+            requestEval(immediate = changed, gap = 120)
+            return
+        }
         if (pauseIfPayment(activePackage)) return
         if (pkg in Targets.SYSTEM_UI) {
             if (activePackage == pkg) {
@@ -254,6 +328,34 @@ class DetachService : AccessibilityService() {
         requestEval(immediate = windowChanged, gap = gap)
     }
 
+    /** The Focus activity and its selected launchable packages are the entire navigation model. */
+    private fun focusAllows(packageName: String): Boolean =
+        packageName in settings.focusAllowedPackages || (packageName == this.packageName && FocusActivity.active)
+
+    /** Gboard and OEM keyboards are separate packages, not com.android.systemui. */
+    private fun currentImePackage(): String? = android.provider.Settings.Secure.getString(
+        contentResolver, android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+    )?.substringBefore('/')
+
+    private fun showFocusHome() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastFocusRedirect < 400L) return
+        lastFocusRedirect = now
+        main.post {
+            // A queued launcher/SystemUI event must never repaint Focus over an allowed app.
+            if (!pausing && FocusSession.active(this) && focusMayRestore) focusHome.show()
+        }
+    }
+
+    private fun hideFocusHome() { main.post { if (::focusHome.isInitialized) focusHome.hide() } }
+
+    /** Called before a selected tile launches, so Focus cannot race back over that app. */
+    internal fun onFocusAllowedLaunch() {
+        focusMayRestore = false
+        main.removeCallbacks(focusReturnCheck)
+        hideFocusHome()
+    }
+
     /** Package of the focused window. Only the name is read, never its content. */
     private fun foreground(): String? = rootInActiveWindow?.packageName?.toString()
 
@@ -291,6 +393,18 @@ class DetachService : AccessibilityService() {
         val root = rootInActiveWindow
         // Only the package name is looked at here; anything that isn't Instagram/YouTube is ignored.
         val pkg = root?.packageName?.toString()
+        if (pkg != null && pkg in settings.blockedPackages) {
+            hideGuard()
+            coverState.clear()
+            pending = null
+            pendingPackage = null
+            val (width, height) = screenSize()
+            val bounds = Rect().also { root.getBoundsInScreen(it) }
+            if (bounds.intersect(wholeAppScreenBounds(width, height)) && !bounds.isEmpty) {
+                showCover(CoverFrame(pkg, bounds, WHOLE_APP_LABEL))
+            } else hideCover()
+            return
+        }
         if (pauseIfPayment(pkg)) return
         if (pkg in Targets.SYSTEM_UI) {
             hideCover()
@@ -325,7 +439,7 @@ class DetachService : AccessibilityService() {
             pending = null
             ig.reset()
             val snap = Snap(root, w, h)
-            if (Guard.isProtectedScreen(snap) && !Guard.isGranted()) showGuard(pkg!!, win) else hideGuard()
+            if (Guard.isProtectedScreen(snap) && (BreatherBudget.restrictionsLocked(this) || !Guard.isGranted())) showGuard(pkg!!, win) else hideGuard()
             return
         }
         hideGuard()
@@ -379,7 +493,7 @@ class DetachService : AccessibilityService() {
     }
 
     private fun execute(a: Action, snap: Snap, now: Long) {
-        if (pausing || foreground() != snap.pkg) return
+        if (pausing || snap.pkg in settings.blockedPackages || foreground() != snap.pkg) return
         while (recentActions.isNotEmpty() && now - recentActions.first() > 6000) recentActions.removeFirst()
         recentActions.addLast(now)
         if (recentActions.size > 8) {
@@ -424,7 +538,7 @@ class DetachService : AccessibilityService() {
     /** "Back to stories" on the cover: re-tapping Home makes Instagram scroll to the top. */
     private fun backToStories() {
         worker.post {
-            if (pausing || foreground() != Targets.INSTAGRAM) return@post
+            if (pausing || Targets.INSTAGRAM in settings.blockedPackages || foreground() != Targets.INSTAGRAM) return@post
             val root = rootInActiveWindow ?: return@post
             if (root.packageName?.toString() != Targets.INSTAGRAM) return@post
             val (w, h) = screenSize()
@@ -437,7 +551,7 @@ class DetachService : AccessibilityService() {
 
     private fun backToSearch() {
         worker.post {
-            if (pausing || foreground() != Targets.INSTAGRAM) return@post
+            if (pausing || Targets.INSTAGRAM in settings.blockedPackages || foreground() != Targets.INSTAGRAM) return@post
             val root = rootInActiveWindow ?: return@post
             if (root.packageName?.toString() != Targets.INSTAGRAM) return@post
             val (w, h) = screenSize()
@@ -479,7 +593,7 @@ class DetachService : AccessibilityService() {
                 return@post
             }
             if (pausing || revision != guardRevision.get()) return@post
-            guard.show(pw, bio, window)
+            guard.show(pw, bio, window, BreatherBudget.restrictionsLocked(this))
         }
         if (first && !coverOn) worker.postDelayed(watchdog, WATCHDOG_MS)
         if (first) health.lastAction("protected Detach's settings page")
@@ -495,6 +609,10 @@ class DetachService : AccessibilityService() {
 
     private fun openUnlock() {
         if (pausing || foreground() !in Targets.GUARDED) return
+        if (BreatherBudget.restrictionsLocked(this)) {
+            android.widget.Toast.makeText(this, "Detach settings are locked until the daily allowance resets.", android.widget.Toast.LENGTH_LONG).show()
+            return
+        }
         val ok = runCatching {
             startActivity(Intent(this, UnlockActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }.isSuccess
@@ -537,10 +655,17 @@ class DetachService : AccessibilityService() {
                 coverOn = false
                 return@post
             }
+            val blocked = frame.pkg in settings.blockedPackages
+            if (blocked != (frame.label == WHOLE_APP_LABEL)) {
+                requestEval(immediate = true)
+                return@post
+            }
             val window = Rect().also { root.getBoundsInScreen(it) }
             val (width, height) = screenSize()
             val bounds = Rect(frame.bounds)
-            if (!window.intersect(safeScreenBounds(width, height)) || !bounds.intersect(window)) {
+            val screen = if (frame.pkg in settings.blockedPackages) wholeAppScreenBounds(width, height)
+                else safeScreenBounds(width, height)
+            if (!window.intersect(screen) || !bounds.intersect(window)) {
                 cover.hide()
                 coverOn = false
                 return@post
@@ -586,6 +711,10 @@ class DetachService : AccessibilityService() {
         )
     }
 
+    // Whole-app covers must include display-cutout areas where the app can draw in landscape.
+    // The actual application window still bounds the cover, including in split-screen mode.
+    private fun wholeAppScreenBounds(width: Int, height: Int) = Rect(0, 0, width, height)
+
     private fun screenSize(): Pair<Int, Int> {
         val wm = getSystemService(WindowManager::class.java)
         return if (Build.VERSION.SDK_INT >= 30) {
@@ -601,6 +730,7 @@ class DetachService : AccessibilityService() {
 
     companion object {
         const val HOME_LABEL = "Feed hidden by Detach"
+        internal const val WHOLE_APP_LABEL = "App blocked by Detach"
 
         /** While a cover/panel is up, how often to check the app is still in front. */
         const val WATCHDOG_MS = 120L
@@ -631,6 +761,14 @@ class DetachService : AccessibilityService() {
                 }
             }
         }
+
+        /** Shows the Focus home without adding a normal Activity to Recents. */
+        fun openFocusHome() { instance?.let { service ->
+            service.focusMayRestore = true
+            service.showFocusHome()
+            service.main.removeCallbacks(service.focusRestoreWatchdog)
+            service.main.post(service.focusRestoreWatchdog)
+        } }
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -644,6 +782,7 @@ class DetachService : AccessibilityService() {
         main.post {
             if (::cover.isInitialized && coverVersion == coverRevision.get()) cover.hide()
             if (::guard.isInitialized && guardVersion == guardRevision.get()) guard.hide()
+            if (::focusHome.isInitialized) focusHome.hide()
         }
         coverOn = false
         guardOn = false

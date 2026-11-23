@@ -170,6 +170,23 @@ class AutomaticPauseTest {
         assertFalse(Pause.consumeResumeAuthorization(context))
     }
 
+    @Test fun `selected blocked app resumes only when no payment is known`() {
+        grant()
+        Settings(context).apply {
+            resumeOnSocialForeground = true
+            blockedPackages = setOf("com.example.blocked")
+        }
+        shadowOf(context.getSystemService(AppOpsManager::class.java)).setMode(
+            AppOpsManager.OPSTR_GET_USAGE_STATS, context.applicationInfo.uid, context.packageName, AppOpsManager.MODE_ALLOWED,
+        )
+        begin()
+        val token = Pause.automaticToken(context)!!
+        Pause.onObservedForeground(context, token, "com.example.blocked", true)
+        assertFalse(Pause.consumeResumeAuthorization(context))
+        Pause.onObservedForeground(context, token, "com.example.blocked", false)
+        assertTrue(Pause.consumeResumeAuthorization(context))
+    }
+
     @Test fun `automatic resume waits until accessibility is actually disabled`() {
         grant()
         begin()

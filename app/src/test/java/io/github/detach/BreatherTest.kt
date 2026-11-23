@@ -150,7 +150,7 @@ class BreatherTest {
         Lock(context).set(BreatherTestSupport.PASSWORD)
         val activity = BreatherTestSupport.activity()
         for (feature in Breather.Feature.entries) {
-            assertEquals(true, BreatherTestSupport.start(activity, 5, setOf(feature)))
+            assertEquals(true, BreatherTestSupport.start(activity, 1, setOf(feature)))
             assertEquals(setOf(feature), Breather.activeFeatures(context))
             for (candidate in Breather.Feature.entries) {
                 assertEquals(candidate == feature, Breather.allows(context, candidate))
@@ -176,14 +176,24 @@ class BreatherTest {
     }
 
     @Test fun `maximum duration expires exactly and never restarts itself`() {
-        start(60)
-        assertTrue(Breather.remainingMs(context) in 3_599_000L..3_600_000L)
-        advance(Duration.ofMillis(3_599_000L))
+        start(30)
+        assertTrue(Breather.remainingMs(context) in 1_799_000L..1_800_000L)
+        advance(Duration.ofMillis(1_799_000L))
         assertTrue(Breather.remainingMs(context) in 1L..1_000L)
         advance(Duration.ofMillis(1_000L))
         assertEquals(0L, Breather.remainingMs(context))
         assertFalse(Breather.allows(context, Breather.Feature.IG_FEED))
         assertTrue(stored.all.isEmpty())
+    }
+
+    @Test fun `scheduled sixty minute allowance starts a sixty minute breather`() {
+        assertTrue(BreatherBudget.setDailyLimit(context, 60))
+        val now = System.currentTimeMillis()
+        context.getSharedPreferences("breather_budget", Context.MODE_PRIVATE).edit()
+            .putLong("end", now - 1).putLong("started_wall", now - 2).putInt("boot", 8).commit()
+        val activity = start(60)
+        assertTrue(Breather.remainingMs(context) in 3_599_000L..3_600_000L)
+        assertEquals(0, BreatherBudget.status(activity)!!.available)
     }
 
     @Test fun `deep sleep counts toward expiry`() {
@@ -194,13 +204,13 @@ class BreatherTest {
     }
 
     @Test fun `extension requires new authentication and replaces rather than accumulates time`() {
-        val activity = start(60)
+        val activity = start(10)
         advance(Duration.ofMinutes(1))
-        Breather.confirmAndBegin(activity, 60, setOf(Breather.Feature.YT_SHORTS)) {}
-        assertTrue(Breather.remainingMs(context) in 3_539_000L..3_540_000L)
+        Breather.confirmAndBegin(activity, 15, setOf(Breather.Feature.YT_SHORTS)) {}
+        assertTrue(Breather.remainingMs(context) in 539_000L..540_000L)
         assertFalse(Breather.allows(context, Breather.Feature.YT_SHORTS))
         BreatherTestSupport.enterPassword(BreatherTestSupport.PASSWORD)
-        assertTrue(Breather.remainingMs(context) in 3_599_000L..3_600_000L)
+        assertTrue(Breather.remainingMs(context) in 899_000L..900_000L)
         assertTrue(Breather.allows(context, Breather.Feature.YT_SHORTS))
         assertFalse(Breather.allows(context, Breather.Feature.IG_FEED))
     }
@@ -212,6 +222,13 @@ class BreatherTest {
         assertTrue(Breather.activeFeatures(context).isEmpty())
         assertTrue(Breather.Feature.entries.none { Breather.allows(context, it) })
         assertTrue(stored.all.isEmpty())
+    }
+
+
+    @Test fun `prepaid final breather remains active when allowance is fully charged`() {
+        start(30)
+        assertEquals(0, BreatherBudget.status(context)!!.available)
+        assertTrue(Breather.remainingMs(context) > 0)
     }
 
     @Test fun `a changed boot count revokes access even before boot receiver delivery`() {
@@ -272,7 +289,7 @@ class BreatherTest {
             { it.putStringSet("features", emptySet()) },
         )
         for (corrupt in corruptions) {
-            assertEquals(true, BreatherTestSupport.start(activity, 5, feed))
+            assertEquals(true, BreatherTestSupport.start(activity, 1, feed))
             stored.edit().also(corrupt).commit()
             assertFalse(Breather.allows(context, Breather.Feature.IG_FEED))
             assertEquals(0L, Breather.remainingMs(context))
@@ -306,7 +323,7 @@ class BreatherTest {
         val activity = Robolectric.buildActivity(BreatherStorageActivity::class.java).setup().get()
         assertEquals(true, BreatherTestSupport.start(activity, 5, feed))
         activity.failWrites = true
-        assertEquals(false, BreatherTestSupport.start(activity, 60, Breather.Feature.entries.toSet()))
+        assertEquals(false, BreatherTestSupport.start(activity, 10, Breather.Feature.entries.toSet()))
         assertEquals(0L, Breather.remainingMs(context))
         assertFalse(Breather.allows(context, Breather.Feature.IG_FEED))
         activity.failWrites = false
@@ -415,7 +432,7 @@ internal object BreatherTestSupport {
     fun reset() {
         val context = RuntimeEnvironment.getApplication()
         Breather.end(context)
-        for (name in listOf("settings", "lock", "pause", "guard", "breather")) {
+        for (name in listOf("settings", "lock", "pause", "guard", "breather", "breather_budget")) {
             context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
         }
         SystemSettings.Global.putInt(context.contentResolver, SystemSettings.Global.BOOT_COUNT, 9)

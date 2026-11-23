@@ -34,6 +34,10 @@ class PaymentLaunchActivity : Activity() {
     }
 
     private fun begin(packageName: String) {
+        if (packageName in Settings(this).blockedPackages) {
+            showError("This app is in your blocked apps list. Remove it there before opening it.")
+            return
+        }
         if (Pause.isPending(this) && !Pause.isServiceEnabled(this)) {
             launch(packageName)
             return
@@ -58,6 +62,10 @@ class PaymentLaunchActivity : Activity() {
     }
 
     private fun launch(packageName: String) {
+        if (packageName in Settings(this).blockedPackages) {
+            showError("This app is in your blocked apps list. Remove it there before opening it.")
+            return
+        }
         val launch = packageManager.getLaunchIntentForPackage(packageName)
         if (launch == null || isFinishing || isDestroyed) {
             showError("This payment app is no longer available.")

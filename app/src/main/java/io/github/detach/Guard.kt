@@ -88,7 +88,7 @@ class GuardOverlay(
     val isShowing get() = view != null
 
     /** Covers [win], the Settings/installer window (the whole screen unless split-screen). */
-    fun show(passwordSet: Boolean, biometric: Boolean, win: android.graphics.Rect) {
+    fun show(passwordSet: Boolean, biometric: Boolean, win: android.graphics.Rect, strict: Boolean = false) {
         if (win.width() <= 0 || win.height() < 40) { hide(); return }
         view?.let { v ->
             (v.layoutParams as? WindowManager.LayoutParams)?.let { lp ->
@@ -117,7 +117,7 @@ class GuardOverlay(
             alpha = 1f
             if (Build.VERSION.SDK_INT >= 30) setFitInsetsTypes(0)
         }
-        val v = build(passwordSet, biometric)
+        val v = build(passwordSet, biometric, strict)
         runCatching { wm.addView(v, lp) }.onSuccess { view = v }
     }
 
@@ -126,7 +126,7 @@ class GuardOverlay(
         view = null
     }
 
-    private fun build(passwordSet: Boolean, biometric: Boolean): View {
+    private fun build(passwordSet: Boolean, biometric: Boolean, strict: Boolean): View {
         val ui = Ui(service)
         val content = LinearLayout(service).apply {
             orientation = LinearLayout.VERTICAL
@@ -144,7 +144,7 @@ class GuardOverlay(
                 biometric -> "your fingerprint"
                 else -> "a 30-second wait"
             }
-            addView(ui.text("Turning Detach off, force-stopping, clearing or uninstalling it needs $confirmation.", 15f, ui.sub).apply {
+            addView(ui.text(if (strict) "Detach settings are locked until your daily allowance resets." else "Turning Detach off, force-stopping, clearing or uninstalling it needs $confirmation.", 15f, ui.sub).apply {
                 gravity = Gravity.CENTER
                 setPadding(0, 0, 0, ui.dp(24))
             })
@@ -155,7 +155,7 @@ class GuardOverlay(
                 passwordSet -> "Enter password"
                 else -> "Wait 30 seconds"
             }
-            addView(ui.quiet(unlockLabel) { if (view != null) onUnlock() })
+            if (!strict) addView(ui.quiet(unlockLabel) { if (view != null) onUnlock() })
         }
         return ScrollView(service).apply {
             isFillViewport = true

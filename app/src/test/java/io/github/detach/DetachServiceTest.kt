@@ -90,6 +90,38 @@ class DetachServiceTest {
         DetachService::class.java.getDeclaredMethod("evaluate").apply { isAccessible = true }.invoke(service)
     }
 
+    @Test fun `a saved blocked package is covered when it appears again`() {
+        val packageName = "example.reinstall"
+        Settings(service).blockedPackages = setOf(packageName)
+        foreground(Screen(packageName))
+        evaluate()
+        assertTrue(value("coverOn") as Boolean)
+        assertEquals(packageName, value("coverPackage"))
+        Settings(service).blockedPackages = emptySet()
+    }
+
+    @Test fun `whole app blocks take priority over Instagram and YouTube rules`() {
+        for (packageName in listOf(Targets.INSTAGRAM, Targets.YOUTUBE)) {
+            Settings(service).blockedPackages = setOf(packageName)
+            foreground(Screen(packageName).node(id = "shorts_player_container"))
+            evaluate()
+            assertTrue(value("coverOn") as Boolean)
+            assertEquals(packageName, value("coverPackage"))
+            assertNull(value("pending"))
+        }
+        Settings(service).blockedPackages = emptySet()
+    }
+
+    @Test fun `whole app block takes priority over automatic payment pause`() {
+        Settings(service).blockedPackages = setOf("com.phonepe.app")
+        foreground(Screen("com.phonepe.app"))
+        event("com.phonepe.app")
+        evaluate()
+        assertTrue(value("coverOn") as Boolean)
+        assertFalse(ForegroundServiceShadow.disabled)
+        Settings(service).blockedPackages = emptySet()
+    }
+
     @Test fun `YouTube Shorts blocking recovers after notification shade closes`() {
         foreground(Screen("com.android.systemui"))
         event("com.android.systemui")

@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   packageNames is the default event allowlist, narrowed or extended to selected payment
-  packages at runtime. Only Instagram, YouTube, and the Settings / uninstall guard screens
-  may have their content read. SystemUI and payment events are metadata-only routes.
+  packages at runtime. During an active Focus session it is temporarily unrestricted so Detach
+  can read only each foreground package name and return unallowlisted launches to Focus. Only
+  Instagram, YouTube, and the Settings / uninstall guard screens have their content inspected.
   No flagRetrieveInteractiveWindows: the service cannot list other apps' windows.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"

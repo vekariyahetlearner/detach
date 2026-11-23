@@ -141,6 +141,11 @@ class UnlockActivity : Activity() {
     }
 
     private fun granted() {
+        if (BreatherBudget.restrictionsLocked(this)) {
+            android.widget.Toast.makeText(this, "Detach settings are locked until the daily allowance resets.", android.widget.Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
         Guard.grant()
         finish()
     }

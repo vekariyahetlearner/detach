@@ -38,27 +38,34 @@ import java.util.concurrent.TimeUnit
 @Suppress("DEPRECATION")
 object PaymentAppPicker {
     fun show(activity: Activity, onSaved: () -> Unit) {
-        if (!activity.isFinishing && !activity.isDestroyed) Session(activity, onSaved).show()
+        if (!activity.isFinishing && !activity.isDestroyed) Session(activity, false, onSaved).show()
+    }
+
+    fun showBlockedApps(activity: Activity, onSaved: () -> Unit) {
+        if (!activity.isFinishing && !activity.isDestroyed) Session(activity, true, onSaved).show()
     }
 
     internal data class App(val info: ApplicationInfo, val name: String) {
         val searchName = name.lowercase(Locale.ROOT)
     }
 
-    internal fun loadApps(manager: PackageManager, ownPackage: String, saved: Set<String>): List<App> {
+    internal fun loadApps(manager: PackageManager, ownPackage: String, saved: Set<String>, blocking: Boolean = false): List<App> {
         val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val leanback = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
         val packages = manager.queryIntentActivities(launcher, 0).mapNotNull { it.activityInfo?.packageName }.toSet() +
-            saved + Targets.PAYMENT_DEFAULTS
+            (if (blocking) manager.queryIntentActivities(leanback, 0).mapNotNull { it.activityInfo?.packageName } else emptyList()) +
+            saved + if (blocking) emptySet() else Targets.PAYMENT_DEFAULTS
         val collator = Collator.getInstance()
         return packages.asSequence().filter {
-            it != ownPackage && it !in Targets.READABLE && it !in Targets.SYSTEM_UI
+            it != ownPackage && (blocking || it !in Targets.READABLE) && it !in Targets.SYSTEM_UI
         }.mapNotNull { packageName ->
             if (Thread.currentThread().isInterrupted) throw InterruptedException()
             runCatching {
                 val info = manager.getApplicationInfo(packageName, 0)
                 val name = manager.getApplicationLabel(info).toString().trim()
-                if (info.flags and ApplicationInfo.FLAG_INSTALLED == 0 || info.icon == 0 ||
-                    name.isBlank() || name == packageName || PACKAGE_LABEL.matches(name)) null
+                if (info.flags and ApplicationInfo.FLAG_INSTALLED == 0) null
+                else if (blocking) App(info, name.ifBlank { packageName })
+                else if (info.icon == 0 || name.isBlank() || name == packageName || PACKAGE_LABEL.matches(name)) null
                 else App(info, name)
             }.getOrNull()
         }.toList().sortedWith { first, second ->
@@ -68,7 +75,9 @@ object PaymentAppPicker {
     }
 
     internal fun loadIcon(manager: PackageManager, app: App, size: Int): Bitmap? = runCatching {
-        val drawable = manager.getDrawable(app.info.packageName, app.info.icon, app.info) ?: return null
+        val drawable = if (app.info.icon != 0) manager.getDrawable(app.info.packageName, app.info.icon, app.info)
+            else manager.getApplicationIcon(app.info)
+        drawable ?: return null
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val width = drawable.intrinsicWidth.takeIf { it > 0 } ?: size
         val height = drawable.intrinsicHeight.takeIf { it > 0 } ?: size
@@ -84,10 +93,10 @@ object PaymentAppPicker {
 
     private val PACKAGE_LABEL = Regex("[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+")
 
-    private class Session(private val activity: Activity, private var onSaved: (() -> Unit)?) :
+    private class Session(private val activity: Activity, private val blocking: Boolean, private var onSaved: (() -> Unit)?) :
         Application.ActivityLifecycleCallbacks {
         private val ui = Ui(activity)
-        private val selected = Settings(activity).paymentPackages.toMutableSet()
+        private val selected = (if (blocking) Settings(activity).blockedPackages else Settings(activity).paymentPackages).toMutableSet()
         private val handler = Handler(Looper.getMainLooper())
         private val executor = ThreadPoolExecutor(1, 1, 10, TimeUnit.SECONDS, ArrayBlockingQueue(24)) { task ->
             Thread(task, "payment-app-picker").apply { isDaemon = true }
@@ -96,6 +105,7 @@ object PaymentAppPicker {
             override fun sizeOf(key: String, value: Bitmap) = value.byteCount
         }
         private val pendingIcons = mutableSetOf<String>()
+        private val failedIcons = mutableSetOf<String>()
         private var apps = emptyList<App>()
         private var visibleApps = emptyList<App>()
         private var closed = false
@@ -140,6 +150,16 @@ object PaymentAppPicker {
             setOnItemClickListener { _, view, position, _ ->
                 val packageName = visibleApps[position].info.packageName
                 if (!selected.add(packageName)) selected.remove(packageName)
+                if (blocking && packageName !in selected && packageName in Settings(activity).blockedPackages &&
+                    BreatherBudget.restrictionsLocked(activity)) {
+                    selected.add(packageName)
+                    android.widget.Toast.makeText(activity, "Blocked apps are locked until the daily allowance resets.", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                if (!blocking && packageName in selected && packageName !in Settings(activity).paymentPackages &&
+                    BreatherBudget.restrictionsLocked(activity)) {
+                    selected.remove(packageName)
+                    android.widget.Toast.makeText(activity, "Payment app additions are locked until the daily allowance resets.", android.widget.Toast.LENGTH_SHORT).show()
+                }
                 (view as Checkable).isChecked = packageName in selected
                 updateSummary()
             }
@@ -150,7 +170,7 @@ object PaymentAppPicker {
             override fun afterTextChanged(text: Editable?) = Unit
         }
         private val dialog = AlertDialog.Builder(activity)
-            .setTitle("Auto-pause apps")
+            .setTitle(if (blocking) "Select apps to block" else "Auto-pause apps")
             .setView(LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(ui.dp(20), ui.dp(8), ui.dp(20), 0)
@@ -176,7 +196,13 @@ object PaymentAppPicker {
                 isEnabled = false
                 setOnClickListener {
                     if (closed || !loaded || activity.isFinishing || activity.isDestroyed) return@setOnClickListener
-                    Settings(activity).paymentPackages = selected
+                    if (blocking) {
+                        val current = Settings(activity).blockedPackages
+                        Settings(activity).blockedPackages = if (BreatherBudget.restrictionsLocked(activity)) selected + current else selected
+                    } else {
+                        val current = Settings(activity).paymentPackages
+                        Settings(activity).paymentPackages = if (BreatherBudget.restrictionsLocked(activity)) selected intersect current else selected
+                    }
                     val callback = onSaved
                     dialog.dismiss()
                     callback?.invoke()
@@ -190,7 +216,7 @@ object PaymentAppPicker {
             val ownPackage = activity.packageName
             val saved = selected.toSet()
             executor.execute {
-                val result = runCatching { loadApps(manager, ownPackage, saved) }
+                val result = runCatching { loadApps(manager, ownPackage, saved, blocking) }
                 main.post { owner.get()?.receiveApps(result) }
             }
         }
@@ -217,7 +243,7 @@ object PaymentAppPicker {
 
         private fun requestIcon(app: App) {
             val packageName = app.info.packageName
-            if (closed || icons.get(packageName) != null || !pendingIcons.add(packageName)) return
+            if (closed || icons.get(packageName) != null || packageName in failedIcons || !pendingIcons.add(packageName)) return
             val owner = WeakReference(this)
             val main = handler
             val manager = activity.applicationContext.packageManager
@@ -239,8 +265,12 @@ object PaymentAppPicker {
                 icons.put(packageName, bitmap)
                 adapter.notifyDataSetChanged()
             } else {
-                apps = apps.filterNot { it.info.packageName == packageName }
-                filter()
+                if (blocking) {
+                    failedIcons.add(packageName)
+                } else {
+                    apps = apps.filterNot { it.info.packageName == packageName }
+                    filter()
+                }
             }
         }
 
